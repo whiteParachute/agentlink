@@ -264,9 +264,55 @@ test('task cancel emits a cancel_run control action and removes it from recovery
   assert.equal(cancelled.task.status, 'CANCELLED');
   assert.equal(cancelled.run?.status, 'CANCELLED');
   assert.equal(cancelled.lease?.status, 'CANCELLED');
-  assert.deepEqual(cancelled.controlActions, [{ type: 'cancel_run', runId: instruction.runId, leaseId: instruction.leaseId, reason: 'user_cancelled' }]);
+  assert.equal(cancelled.controlActions.length, 1);
+  assert.equal(cancelled.controlActions[0]?.type, 'cancel_run');
+  assert.equal(cancelled.controlActions[0]?.runId, instruction.runId);
+  assert.equal(cancelled.controlActions[0]?.leaseId, instruction.leaseId);
+  assert.equal(cancelled.controlActions[0]?.reason, 'user_cancelled');
+  assert.equal(cancelled.controlActions[0]?.status, 'PENDING');
 
   const polled = controlPlane.pollControl(registered.device.id);
   assert.deepEqual(polled.controlActions, cancelled.controlActions);
+  const acked = controlPlane.ackControlAction(registered.device.id, cancelled.controlActions[0]?.id ?? '');
+  assert.equal(acked.controlAction.status, 'ACKED');
+  assert.deepEqual(controlPlane.pollControl(registered.device.id).controlActions, []);
   assert.deepEqual(controlPlane.recoverDevice(registered.device.id).recoverableRuns, []);
+});
+
+test('lease renew extends an executing lease and recovery decisions continue or discard active work', () => {
+  const { controlPlane, registered } = bootstrap();
+  const first = controlPlane.pull({ deviceId: registered.device.id, runnerId: registered.runner.id });
+  assert.ok(first);
+  assert.throws(
+    () => controlPlane.renewLease(first.leaseId),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_STATE_CONFLICT',
+  );
+  controlPlane.ackLease(first.leaseId, true);
+
+  const renewed = controlPlane.renewLease(first.leaseId);
+  assert.equal(renewed.lease.status, 'RENEWED');
+  assert.equal(renewed.run.status, 'RUNNING');
+  assert.equal(renewed.task.status, 'RUNNING');
+  assert.deepEqual(renewed.controlActions, []);
+
+  const continued = controlPlane.decideRecovery({ deviceId: registered.device.id, leaseId: first.leaseId, decision: 'continue' });
+  assert.equal(continued.decision, 'continue');
+  assert.equal(continued.lease.status, 'RENEWED');
+  assert.equal(continued.run.status, 'RUNNING');
+
+  const secondCreated = controlPlane.createTask(
+    { source: 'telegram', sourceRef: 'telegram:chat:recover-discard', payload: { text: 'discard me' } },
+    'idem-recover-discard',
+  );
+  const second = controlPlane.pull({ deviceId: registered.device.id, runnerId: registered.runner.id });
+  assert.ok(second);
+  controlPlane.ackLease(second.leaseId, true);
+  const discarded = controlPlane.decideRecovery({ deviceId: registered.device.id, leaseId: second.leaseId, decision: 'discard', reason: 'lost_process' });
+  assert.equal(discarded.decision, 'discard');
+  assert.equal(discarded.lease.status, 'EXPIRED');
+  assert.equal(discarded.run.status, 'TIMED_OUT');
+  assert.equal(discarded.task.status, 'QUEUED');
+  assert.equal(discarded.task.retryCount, 1);
+  assert.notEqual(discarded.task.currentRunId, secondCreated.run.id);
+  assert.equal(discarded.retryRun?.attemptNo, 2);
 });

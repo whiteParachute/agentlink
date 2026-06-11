@@ -466,6 +466,38 @@ JOIN updated_run r ON r.id = l.run_id
 JOIN updated_task t ON t.id = r.task_id;
 `,
 
+  renewLease: `
+WITH target AS (
+  SELECT r.id AS run_id, r.task_id, l.id AS lease_id, l.device_id
+  FROM al_run r
+  JOIN al_run_lease l ON l.id = $1 AND l.run_id = r.id
+  WHERE r.status = 'RUNNING'
+    AND r.current_lease_id = l.id
+    AND l.status IN ('ACKED', 'RENEWED')
+  FOR UPDATE OF r, l
+), updated_lease AS (
+  UPDATE al_run_lease l
+  SET status = 'RENEWED', renewed_at = $2, expires_at = $3, updated_at = $2, version = l.version + 1
+  FROM target
+  WHERE l.id = target.lease_id
+  RETURNING l.*
+), updated_run AS (
+  UPDATE al_run r
+  SET updated_at = $2, version = r.version + 1
+  FROM target
+  WHERE r.id = target.run_id
+  RETURNING r.*
+), selected_task AS (
+  SELECT t.*
+  FROM al_task t
+  JOIN updated_run r ON r.task_id = t.id
+)
+SELECT row_to_json(l) AS lease, row_to_json(r) AS run, row_to_json(t) AS task
+FROM updated_lease l
+JOIN updated_run r ON r.id = l.run_id
+JOIN selected_task t ON t.id = r.task_id;
+`,
+
   appendAgentletProgress: `
 INSERT INTO al_run_event (run_id, seq, domain, event_type, payload, emitted_at)
 SELECT r.id, $3, r.domain, $4, $5::jsonb, $6
@@ -688,23 +720,62 @@ WITH target_task AS (
   FROM target_task target
   WHERE t.id = target.id
   RETURNING t.*
+), inserted_control_action AS (
+  INSERT INTO al_control_action (
+    id,
+    domain,
+    device_id,
+    run_id,
+    lease_id,
+    action_type,
+    status,
+    reason,
+    created_at,
+    updated_at
+  )
+  SELECT $4, l.domain, l.device_id, l.run_id, l.id, 'cancel_run', 'PENDING', COALESCE(l.expire_reason, $3), $2, $2
+  FROM updated_lease l
+  ON CONFLICT (device_id, action_type, lease_id)
+  DO UPDATE SET status = 'PENDING',
+                reason = EXCLUDED.reason,
+                acknowledged_at = NULL,
+                updated_at = EXCLUDED.updated_at
+  RETURNING *
 )
-SELECT row_to_json(t) AS task, row_to_json(r) AS run, row_to_json(l) AS lease
+SELECT row_to_json(t) AS task, row_to_json(r) AS run, row_to_json(l) AS lease, row_to_json(a) AS control_action
 FROM updated_task t
 LEFT JOIN updated_run r ON r.task_id = t.id
-LEFT JOIN updated_lease l ON l.run_id = r.id;
+LEFT JOIN updated_lease l ON l.run_id = r.id
+LEFT JOIN inserted_control_action a ON a.lease_id = l.id;
 `,
 
   listControlActionsForDevice: `
-SELECT row_to_json(l) AS lease, row_to_json(r) AS run
-FROM al_run_lease l
-JOIN al_run r ON r.id = l.run_id
-WHERE l.device_id = $1
-  AND l.status = 'CANCELLED'
-  AND l.cancelled_at IS NOT NULL
-  AND r.status = 'CANCELLED'
-ORDER BY l.cancelled_at DESC, l.id ASC
+SELECT row_to_json(a) AS control_action
+FROM al_control_action a
+WHERE a.device_id = $1
+  AND a.status = 'PENDING'
+ORDER BY a.created_at ASC, a.id ASC
 LIMIT $2;
+`,
+
+  ackControlAction: `
+WITH target AS (
+  SELECT a.*
+  FROM al_control_action a
+  WHERE a.id = $1
+    AND a.device_id = $2
+  FOR UPDATE
+), updated_action AS (
+  UPDATE al_control_action a
+  SET status = 'ACKED',
+      acknowledged_at = COALESCE(a.acknowledged_at, $3),
+      updated_at = $3
+  FROM target
+  WHERE a.id = target.id
+  RETURNING a.*
+)
+SELECT row_to_json(a) AS control_action
+FROM updated_action a;
 `,
 
   listRecoverableRunsForDevice: `
@@ -718,6 +789,79 @@ WHERE l.device_id = $1
   AND r.status IN ('LEASED', 'RUNNING')
 ORDER BY l.updated_at ASC, l.id ASC
 LIMIT $2;
+`,
+
+  recoverContinue: `
+WITH target AS (
+  SELECT r.id AS run_id, r.task_id, l.id AS lease_id
+  FROM al_run_lease l
+  JOIN al_run r ON r.id = l.run_id
+  WHERE l.id = $1
+    AND l.device_id = $2
+    AND l.status IN ${ACTIVE_LEASE_STATUSES_SQL}
+    AND r.current_lease_id = l.id
+    AND r.status IN ('LEASED', 'RUNNING')
+  FOR UPDATE OF r, l
+), updated_lease AS (
+  UPDATE al_run_lease l
+  SET status = 'RENEWED', renewed_at = $3, expires_at = $4, updated_at = $3, version = l.version + 1
+  FROM target
+  WHERE l.id = target.lease_id
+  RETURNING l.*
+), updated_run AS (
+  UPDATE al_run r
+  SET status = 'RUNNING', started_at = COALESCE(r.started_at, $3), updated_at = $3, version = r.version + 1
+  FROM target
+  WHERE r.id = target.run_id
+  RETURNING r.*
+), updated_task AS (
+  UPDATE al_task t
+  SET status = 'RUNNING', updated_at = $3
+  FROM updated_run r
+  WHERE t.id = r.task_id
+  RETURNING t.*
+)
+SELECT row_to_json(l) AS lease, row_to_json(r) AS run, row_to_json(t) AS task
+FROM updated_lease l
+JOIN updated_run r ON r.id = l.run_id
+JOIN updated_task t ON t.id = r.task_id;
+`,
+
+  recoverDiscard: `
+WITH target AS (
+  SELECT r.id AS run_id, r.task_id, l.id AS lease_id
+  FROM al_run_lease l
+  JOIN al_run r ON r.id = l.run_id
+  WHERE l.id = $1
+    AND l.device_id = $2
+    AND l.status IN ${ACTIVE_LEASE_STATUSES_SQL}
+    AND r.current_lease_id = l.id
+    AND r.status IN ('LEASED', 'RUNNING')
+  FOR UPDATE OF r, l
+), updated_lease AS (
+  UPDATE al_run_lease l
+  SET status = 'EXPIRED', expire_reason = $3, updated_at = $4, version = l.version + 1
+  FROM target
+  WHERE l.id = target.lease_id
+  RETURNING l.*
+), updated_run AS (
+  UPDATE al_run r
+  SET status = 'TIMED_OUT', finished_at = $4, updated_at = $4, version = r.version + 1
+  FROM target
+  WHERE r.id = target.run_id
+  RETURNING r.*
+), updated_task AS (
+  UPDATE al_task t
+  SET status = 'FAILED', updated_at = $4
+  FROM updated_run r
+  WHERE t.id = r.task_id
+    AND t.current_run_id = r.id
+  RETURNING t.*
+)
+SELECT row_to_json(l) AS lease, row_to_json(r) AS run, row_to_json(t) AS task
+FROM updated_lease l
+JOIN updated_run r ON r.id = l.run_id
+JOIN updated_task t ON t.id = r.task_id;
 `,
 } as const;
 

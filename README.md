@@ -1,45 +1,58 @@
 # Agentlink
 
-Agentlink is a lightweight control plane for coordinating personal AI agents across devices. It keeps user entry points simple, routes tasks to trusted device-side agentlets, and lets each device execute with its local runners and credentials.
+Agentlink 是一个面向个人多设备 AI 工作流的轻量控制面。它把用户入口、任务状态、设备能力、租约调度和执行结果汇报放到一个清晰的中心层里，同时把真正的执行权和凭据留在设备侧 agentlet。
 
-The first milestone focuses on a single personal loop:
+当前 M1 目标是跑通一个最小个人闭环：
 
 ```text
-Telegram -> Agentlink Control Plane -> Device Agentlet -> Codex CLI -> Telegram
+Telegram -> Agentlink Control Plane -> claw-tenc Agentlet -> Codex CLI -> Telegram
 ```
 
-## Why Agentlink
+## 为什么做 Agentlink
 
-Modern AI work often spans several machines, networks, tools, and message channels. Agentlink provides a small, explicit layer for:
+个人 AI 工作流经常跨多台设备、多种 runner、多套网络环境和多个消息入口。Agentlink 的目标不是替代这些工具，而是提供一个小而明确的控制面：
 
-- registering devices and their available runners;
-- turning user messages into trackable tasks and runs;
-- leasing work to device-side agentlets without exposing devices publicly;
-- streaming progress and final results back to the originating channel;
-- keeping credentials and local execution authority on the device that owns them.
+- 统一创建和追踪 Task / Run；
+- 注册设备、runner、capability 和 workdir grant；
+- 通过 lease 把任务安全地下发给设备侧 agentlet；
+- 让 agentlet 主动 pull / renew / recover，避免设备暴露公网入口；
+- 回收 progress、artifact 和 final result；
+- 保持 runner 凭据、代码目录和本地执行权限只留在设备上。
 
-## Core concepts
+## 核心概念
 
-- **Task** — the user-level request created from an inbound channel message or API call.
-- **Run** — one executable attempt for a task, including retry metadata.
-- **Lease** — a time-bound assignment that gives one agentlet exclusive execution rights for a run.
-- **Device** — a trusted machine that can host one or more runners.
-- **Agentlet** — the device-side process that pulls work, runs local tools, and reports progress.
-- **Runner** — a local execution backend such as Codex CLI.
+- **Task**：用户层请求，通常来自 Telegram 或 API。
+- **Run**：一次具体执行 attempt，包含 retry 信息。
+- **Lease**：一个有时效的执行租约，保证同一 Run 同时只被一个 agentlet 执行。
+- **Device**：可信设备，例如 M1 的 `claw-tenc`。
+- **Agentlet**：设备侧常驻进程，负责拉取任务、续租、恢复、执行和上报。
+- **Runner**：本地执行后端，M1 首个 runner 是 Codex CLI。
+- **Control Action**：控制面下发给 agentlet 的控制指令，例如 `cancel_run`。
 
-## Current status
+## 当前状态
 
-Agentlink is in early development. The repository currently contains:
+Agentlink 仍处于 M1 开发阶段，当前仓库已经包含：
 
-- a Node.js 22 + TypeScript control-plane skeleton;
-- a minimal HTTP API for tasks, devices, leases, cancel/control/recover, progress, and completion;
-- an in-memory implementation for executable protocol tests;
-- PostgreSQL schema, SQL contracts, repository adapter, `pg` runtime adapter, opt-in PostgreSQL server mode wiring, and control/recover contracts;
-- GitHub Actions CI and Node built-in tests.
+- Node.js 22 + TypeScript 控制面骨架；
+- Task / Run / Lease / Device 的最小 HTTP API；
+- in-memory control plane，用于协议级测试；
+- PostgreSQL schema、SQL contract、repository adapter 和 `pg` runtime adapter；
+- 可选 PostgreSQL-backed server mode：`AGENTLINK_STORAGE=postgres`；
+- 静态 capability grant / workdir grant 派发前校验；
+- agentlet `pull` / `ack` / `lease/renew` / `control/poll` / `control/ack` / `recover` / `recover/decision` / `progress` / `complete` 的协议骨架；
+- GitHub Actions CI 和 Node 内置测试。
 
-Not yet included: live PostgreSQL DSN/concurrency verification, Telegram adapter, device agentlet daemon, Codex runner adapter, or production deployment guide.
+还未包含：
 
-## Quick start
+- 真实 PostgreSQL DSN 下的完整并发 lease 验证；
+- 常驻 agentlet daemon；
+- Codex Runner Adapter；
+- Telegram Adapter；
+- 生产部署配置和端到端 E2E。
+
+因此当前项目还不能作为可用产品部署，只能作为 M1 控制面与协议骨架继续迭代。
+
+## 快速开始
 
 ```bash
 npm ci
@@ -47,39 +60,52 @@ npm run check
 npm start
 ```
 
-The server exposes:
+默认启动 in-memory 模式，适合本地协议 smoke test。
+
+基础端点：
 
 - `GET /healthz`
 - `GET /readyz`
 - `GET /api/v1/meta`
 
-Optional PostgreSQL migration smoke test:
+## PostgreSQL
+
+运行 migration smoke test：
 
 ```bash
 AGENTLINK_DATABASE_URL=postgres://... npm run db:smoke
 ```
 
-Without `AGENTLINK_DATABASE_URL`, the smoke test exits successfully with a skip message.
+未设置 `AGENTLINK_DATABASE_URL` 时，`db:smoke` 会按设计跳过并返回成功。
 
-Optional PostgreSQL-backed server mode:
+启用 PostgreSQL-backed server mode：
 
 ```bash
-AGENTLINK_STORAGE=postgres AGENTLINK_DATABASE_URL=postgres://... npm start
+AGENTLINK_STORAGE=postgres \
+AGENTLINK_DATABASE_URL=postgres://... \
+npm start
 ```
 
-The default remains `AGENTLINK_STORAGE=memory` for local protocol smoke tests.
+默认仍是：
 
-## Development
+```bash
+AGENTLINK_STORAGE=memory
+```
+
+## 开发命令
 
 ```bash
 npm run typecheck
 npm test
 npm run build
 npm run db:smoke
+npm audit --omit=dev
 ```
 
-Runtime dependencies are intentionally small; `pg` is included because PostgreSQL is the control-plane source of truth for deployable M1 state.
+## 设计边界
+
+M1 只做 personal domain 的最小闭环，不接管所有个人设备，也不接入 work domain。当前优先级是让 `claw-tenc + Codex CLI` 跑通稳定闭环，再逐步接入 Telegram、更多 runner 和更多设备。
 
 ## License
 
-Agentlink is released under the MIT License. See [LICENSE](./LICENSE).
+Agentlink 使用 MIT License，详见 [LICENSE](./LICENSE)。

@@ -141,10 +141,16 @@ export interface RunEventRecord {
 }
 
 export interface ControlActionRecord {
+  id: string;
   type: 'cancel_run';
+  deviceId: string;
   runId: string;
   leaseId: string;
   reason: string;
+  status: 'PENDING' | 'ACKED';
+  createdAt: string;
+  acknowledgedAt?: string;
+  updatedAt: string;
 }
 
 export interface RecoverableRunRecord {
@@ -156,3 +162,5 @@ export interface RecoverableRunRecord {
   instruction: JsonRecord;
   expiresAt: string;
 }
+
+export type RecoverDecision = 'continue' | 'discard';

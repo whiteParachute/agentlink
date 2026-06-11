@@ -75,7 +75,18 @@ async function handleRequest(
       service: info.name,
       version: info.version,
       m1Scope: 'personal:telegram-agentlink-claw-tenc-codex',
-      capabilities: ['task-api', 'device-register', 'agentlet-pull', 'agentlet-control', 'agentlet-recover', 'agentlet-progress', 'agentlet-complete'],
+      capabilities: [
+        'task-api',
+        'device-register',
+        'agentlet-pull',
+        'agentlet-lease-renew',
+        'agentlet-control',
+        'agentlet-control-ack',
+        'agentlet-recover',
+        'agentlet-recover-decision',
+        'agentlet-progress',
+        'agentlet-complete',
+      ],
     });
     return;
   }
@@ -205,12 +216,45 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/v1/agentlet/control/ack') {
+    const body = await readJsonRecord(req);
+    const deviceId = requireString(body, 'device_id');
+    await controlPlane.authenticateDevice(deviceId, requireBearer(req));
+    const result = await controlPlane.ackControlAction(deviceId, requireString(body, 'action_id'));
+    sendJson(res, 200, { control_action: toControlActionDto(result.controlAction) });
+    return;
+  }
+
   if (req.method === 'POST' && url.pathname === '/api/v1/agentlet/recover') {
     const body = await readJsonRecord(req);
     const deviceId = requireString(body, 'device_id');
     await controlPlane.authenticateDevice(deviceId, requireBearer(req));
     const result = await controlPlane.recoverDevice(deviceId);
     sendJson(res, 200, { recoverable_runs: result.recoverableRuns.map(toRecoverableRunDto) });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v1/agentlet/recover/decision') {
+    const body = await readJsonRecord(req);
+    const deviceId = requireString(body, 'device_id');
+    await controlPlane.authenticateDevice(deviceId, requireBearer(req));
+    await ensureLeaseBelongsToDevice(controlPlane, requireString(body, 'lease_id'), deviceId);
+    const decision = requireString(body, 'decision');
+    if (decision !== 'continue' && decision !== 'discard') throw new AgentlinkError(400, 'AL_BAD_REQUEST', 'decision must be continue or discard');
+    const reason = optionalString(body, 'reason');
+    const result = await controlPlane.decideRecovery({
+      deviceId,
+      leaseId: requireString(body, 'lease_id'),
+      decision,
+      ...(reason ? { reason } : {}),
+    });
+    sendJson(res, 200, {
+      decision: result.decision,
+      lease: toLeaseDto(result.lease),
+      run: toRunDto(result.run),
+      task: toTaskDto(result.task),
+      retry_run: result.retryRun ? toRunDto(result.retryRun) : null,
+    });
     return;
   }
 
@@ -221,6 +265,21 @@ async function handleRequest(
     await ensureLeaseBelongsToDevice(controlPlane, requireString(body, 'lease_id'), deviceId);
     const result = await controlPlane.ackLease(requireString(body, 'lease_id'), requireBoolean(body, 'accepted'), optionalString(body, 'reason'));
     sendJson(res, 200, { lease: toLeaseDto(result.lease), run: toRunDto(result.run), task: toTaskDto(result.task) });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v1/agentlet/lease/renew') {
+    const body = await readJsonRecord(req);
+    const deviceId = requireString(body, 'device_id');
+    await controlPlane.authenticateDevice(deviceId, requireBearer(req));
+    await ensureLeaseBelongsToDevice(controlPlane, requireString(body, 'lease_id'), deviceId);
+    const result = await controlPlane.renewLease(requireString(body, 'lease_id'));
+    sendJson(res, 200, {
+      lease: toLeaseDto(result.lease),
+      run: toRunDto(result.run),
+      task: toTaskDto(result.task),
+      control_actions: result.controlActions.map(toControlActionDto),
+    });
     return;
   }
 
@@ -349,12 +408,18 @@ function toRunEventDto(event: { runId: string; seq: number; domain: string; even
   };
 }
 
-function toControlActionDto(action: { type: 'cancel_run'; runId: string; leaseId: string; reason: string }) {
+function toControlActionDto(action: { id: string; type: 'cancel_run'; deviceId: string; runId: string; leaseId: string; reason: string; status: string; createdAt: string; acknowledgedAt?: string; updatedAt: string }) {
   return {
+    action_id: action.id,
     type: action.type,
+    device_id: action.deviceId,
     run_id: action.runId,
     lease_id: action.leaseId,
     reason: action.reason,
+    status: action.status,
+    created_at: action.createdAt,
+    acknowledged_at: action.acknowledgedAt,
+    updated_at: action.updatedAt,
   };
 }
 

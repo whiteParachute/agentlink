@@ -173,6 +173,21 @@ CREATE TABLE al_run_event (
   PRIMARY KEY (run_id, seq)
 );
 
+CREATE TABLE al_control_action (
+  id uuid PRIMARY KEY,
+  domain al_domain NOT NULL DEFAULT 'personal',
+  device_id uuid NOT NULL REFERENCES al_device(id),
+  run_id uuid NOT NULL REFERENCES al_run(id),
+  lease_id uuid NOT NULL REFERENCES al_run_lease(id),
+  action_type text NOT NULL CHECK (action_type IN ('cancel_run')),
+  status text NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'ACKED')),
+  reason text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  acknowledged_at timestamptz,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (device_id, action_type, lease_id)
+);
+
 CREATE TABLE al_artifact (
   domain al_domain NOT NULL DEFAULT 'personal',
   hash text NOT NULL,
@@ -212,6 +227,7 @@ CREATE INDEX idx_al_workdir_grant_active_device
 ON al_workdir_grant(domain, device_id, path_prefix, access_mode)
 WHERE revoked_at IS NULL;
 CREATE INDEX idx_al_policy_decision_run ON al_policy_decision(run_id);
+CREATE INDEX idx_al_control_action_device_status_created ON al_control_action(device_id, status, created_at);
 CREATE INDEX idx_al_audit_log_domain_created ON al_audit_log(domain, created_at DESC);
 
 COMMIT;

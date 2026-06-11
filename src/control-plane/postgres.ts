@@ -60,9 +60,7 @@ export class PostgresControlPlane implements AgentlinkControlPlanePort {
   async cancelTask(taskId: string, reason?: string) {
     return await this.withRepository(async (repository) => {
       const cancelled = await repository.cancelTask(taskId, reason);
-      const controlActions = cancelled.lease
-        ? [{ type: 'cancel_run' as const, runId: cancelled.lease.runId, leaseId: cancelled.lease.id, reason: cancelled.lease.expireReason ?? reason ?? 'user_cancelled' }]
-        : [];
+      const controlActions = cancelled.controlAction ? [cancelled.controlAction] : [];
       return { ...cancelled, controlActions };
     });
   }
@@ -71,14 +69,36 @@ export class PostgresControlPlane implements AgentlinkControlPlanePort {
     return await this.withRepository(async (repository) => ({ controlActions: await repository.listControlActionsForDevice(deviceId) }));
   }
 
+  async ackControlAction(deviceId: string, actionId: string) {
+    return await this.withRepository(async (repository) => ({ controlAction: await repository.ackControlAction(deviceId, actionId) }));
+  }
+
   async recoverDevice(deviceId: string) {
     return await this.withRepository(async (repository) => ({ recoverableRuns: await repository.listRecoverableRunsForDevice(deviceId) }));
+  }
+
+  async decideRecovery(input: { deviceId: string; leaseId: string; decision: 'continue' | 'discard'; reason?: string }) {
+    return await this.withRepository(async (repository) => {
+      if (input.decision === 'continue') {
+        const continued = await repository.recoverContinue(input.leaseId, input.deviceId);
+        return { decision: input.decision, ...continued };
+      }
+      const discarded = await repository.recoverDiscard(input.leaseId, input.deviceId, input.reason);
+      return { decision: input.decision, ...discarded };
+    });
   }
 
   async ackLease(leaseId: string, accepted: boolean, reason?: string) {
     return await this.withRepository(async (repository) => {
       const deviceId = await this.mustDeviceIdFromLease(repository, leaseId);
       return accepted ? await repository.ackLeaseAccepted(leaseId, deviceId) : await repository.ackLeaseRejected(leaseId, deviceId, reason);
+    });
+  }
+
+  async renewLease(leaseId: string) {
+    return await this.withRepository(async (repository) => {
+      const renewed = await repository.renewLease(leaseId);
+      return { ...renewed, controlActions: await repository.listControlActionsForDevice(renewed.lease.deviceId) };
     });
   }
 

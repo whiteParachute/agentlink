@@ -98,6 +98,25 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'missing active workdir grant lookup index in schema ${schema}';
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = '${schema}'
+      AND table_name = 'al_control_action'
+      AND column_name = 'acknowledged_at'
+  ) THEN
+    RAISE EXCEPTION 'missing al_control_action.acknowledged_at in schema ${schema}';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_indexes
+    WHERE schemaname = '${schema}'
+      AND indexname = 'idx_al_control_action_device_status_created'
+  ) THEN
+    RAISE EXCEPTION 'missing control action device/status index in schema ${schema}';
+  END IF;
 END $$;
 `);
   console.log(`PostgreSQL migration smoke passed in temporary schema ${schema}.`);

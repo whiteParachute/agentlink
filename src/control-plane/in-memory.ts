@@ -7,6 +7,7 @@ import type {
   JsonRecord,
   LeaseRecord,
   PolicyDecisionRecord,
+  RecoverDecision,
   RecoverableRunRecord,
   RunEventRecord,
   RunRecord,
@@ -102,6 +103,7 @@ export class InMemoryControlPlane {
   private readonly workdirGrants = new Map<string, WorkdirGrantRecord>();
   private readonly policyDecisions = new Map<string, PolicyDecisionRecord>();
   private readonly leases = new Map<string, LeaseRecord>();
+  private readonly controlActions = new Map<string, ControlActionRecord>();
   private readonly taskIdempotency = new Map<string, IdempotencyEntry>();
   private readonly events = new Map<string, Map<number, RunEventRecord>>();
 
@@ -354,7 +356,7 @@ export class InMemoryControlPlane {
           lease.updatedAt = now;
           lease.version += 1;
           cancelledLease = lease;
-          controlActions.push({ type: 'cancel_run', runId: run.id, leaseId: lease.id, reason });
+          controlActions.push(this.createControlAction(lease, reason, now));
         }
       }
       cancelledRun = this.updateRun(run.id, { status: 'CANCELLED', finishedAt: now, updatedAt: now });
@@ -366,10 +368,27 @@ export class InMemoryControlPlane {
 
   pollControl(deviceId: string): { controlActions: ControlActionRecord[] } {
     this.mustGetDevice(deviceId);
-    const controlActions = [...this.leases.values()]
-      .filter((lease) => lease.deviceId === deviceId && lease.status === 'CANCELLED' && Boolean(lease.cancelledAt))
-      .map((lease) => ({ type: 'cancel_run' as const, runId: lease.runId, leaseId: lease.id, reason: lease.expireReason ?? 'user_cancelled' }));
+    const controlActions = [...this.controlActions.values()]
+      .filter((action) => action.deviceId === deviceId && action.status === 'PENDING')
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
     return { controlActions };
+  }
+
+  ackControlAction(deviceId: string, actionId: string): { controlAction: ControlActionRecord } {
+    this.mustGetDevice(deviceId);
+    const action = this.controlActions.get(actionId);
+    if (!action) throw new AgentlinkError(404, 'AL_CONTROL_ACTION_NOT_FOUND', 'Control action not found');
+    if (action.deviceId !== deviceId) throw new AgentlinkError(403, 'AL_CONTROL_ACTION_FORBIDDEN', 'Control action does not belong to this device');
+    if (action.status === 'ACKED') return { controlAction: action };
+    const now = this.timestamp();
+    const next: ControlActionRecord = {
+      ...action,
+      status: 'ACKED',
+      acknowledgedAt: now,
+      updatedAt: now,
+    };
+    this.controlActions.set(action.id, next);
+    return { controlAction: next };
   }
 
   recoverDevice(deviceId: string): { recoverableRuns: RecoverableRunRecord[] } {
@@ -390,6 +409,25 @@ export class InMemoryControlPlane {
         }];
       });
     return { recoverableRuns };
+  }
+
+  decideRecovery(input: { deviceId: string; leaseId: string; decision: RecoverDecision; reason?: string }): { decision: RecoverDecision; lease: LeaseRecord; run: RunRecord; task: TaskRecord; retryRun?: RunRecord } {
+    this.mustGetDevice(input.deviceId);
+    const lease = this.mustGetLease(input.leaseId);
+    if (lease.deviceId !== input.deviceId) throw new AgentlinkError(403, 'AL_RUN_001', 'Lease does not belong to this device');
+    const run = this.mustGetRun(lease.runId);
+    if (run.currentLeaseId !== lease.id || !isActiveLeaseStatus(lease.status) || (run.status !== 'LEASED' && run.status !== 'RUNNING')) {
+      throw new AgentlinkError(409, 'AL_LEASE_EXPIRED', 'Lease is not recoverable');
+    }
+    if (input.decision === 'continue') {
+      const renewed = this.renewLeaseForRecovery(run, lease);
+      return { decision: input.decision, ...renewed };
+    }
+    if (input.decision !== 'discard') {
+      throw new AgentlinkError(400, 'AL_BAD_REQUEST', 'decision must be continue or discard');
+    }
+    const discarded = this.discardRecoverableLease(run, lease, input.reason ?? 'agentlet_recover_discard');
+    return { decision: input.decision, ...discarded };
   }
 
   ackLease(leaseId: string, accepted: boolean, reason?: string): { lease: LeaseRecord; run: RunRecord; task: TaskRecord } {
@@ -415,6 +453,13 @@ export class InMemoryControlPlane {
     const run = this.updateRun(lease.runId, { status: 'RUNNING', startedAt: now, updatedAt: now });
     const task = this.mustGetTask(run.taskId);
     return { lease, run, task };
+  }
+
+  renewLease(leaseId: string): { lease: LeaseRecord; run: RunRecord; task: TaskRecord; controlActions: ControlActionRecord[] } {
+    const run = this.mustGetRun(this.mustGetLease(leaseId).runId);
+    const lease = this.mustHaveExecutingLease(run, leaseId);
+    const renewed = this.renewLeaseForExecution(run, lease);
+    return { ...renewed, controlActions: this.pollControl(lease.deviceId).controlActions };
   }
 
   appendProgress(input: { runId: string; leaseId: string; seq: number; eventType: string; payload?: JsonRecord }): RunEventRecord {
@@ -631,6 +676,84 @@ export class InMemoryControlPlane {
     };
     this.runs.set(nextRun.id, nextRun);
     return nextRun;
+  }
+
+  private createControlAction(lease: LeaseRecord, reason: string, now: string): ControlActionRecord {
+    const existing = [...this.controlActions.values()].find((action) => action.type === 'cancel_run' && action.leaseId === lease.id);
+    if (existing) {
+      const refreshed: ControlActionRecord = {
+        ...existing,
+        reason,
+        status: 'PENDING',
+        updatedAt: now,
+      };
+      delete refreshed.acknowledgedAt;
+      this.controlActions.set(refreshed.id, refreshed);
+      return refreshed;
+    }
+    const action: ControlActionRecord = {
+      id: randomUUID(),
+      type: 'cancel_run',
+      deviceId: lease.deviceId,
+      runId: lease.runId,
+      leaseId: lease.id,
+      reason,
+      status: 'PENDING',
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.controlActions.set(action.id, action);
+    return action;
+  }
+
+  private renewLeaseForExecution(run: RunRecord, lease: LeaseRecord): { lease: LeaseRecord; run: RunRecord; task: TaskRecord } {
+    const nowDate = this.now();
+    const now = nowDate.toISOString();
+    lease.status = 'RENEWED';
+    lease.renewedAt = now;
+    lease.expiresAt = new Date(nowDate.getTime() + this.leaseTtlMs).toISOString();
+    lease.updatedAt = now;
+    lease.version += 1;
+    const updatedRun = this.updateRun(run.id, { status: 'RUNNING', updatedAt: now, startedAt: run.startedAt ?? now });
+    const task = this.updateTask(updatedRun.taskId, { status: 'RUNNING', updatedAt: now });
+    return { lease, run: updatedRun, task };
+  }
+
+  private renewLeaseForRecovery(run: RunRecord, lease: LeaseRecord): { lease: LeaseRecord; run: RunRecord; task: TaskRecord } {
+    const nowDate = this.now();
+    const now = nowDate.toISOString();
+    lease.status = 'RENEWED';
+    lease.renewedAt = now;
+    lease.expiresAt = new Date(nowDate.getTime() + this.leaseTtlMs).toISOString();
+    lease.updatedAt = now;
+    lease.version += 1;
+    const updatedRun = this.updateRun(run.id, { status: 'RUNNING', updatedAt: now, startedAt: run.startedAt ?? now });
+    const task = this.updateTask(updatedRun.taskId, { status: 'RUNNING', updatedAt: now });
+    return { lease, run: updatedRun, task };
+  }
+
+  private discardRecoverableLease(run: RunRecord, lease: LeaseRecord, reason: string): { lease: LeaseRecord; run: RunRecord; task: TaskRecord; retryRun?: RunRecord } {
+    const now = this.timestamp();
+    lease.status = 'EXPIRED';
+    lease.expireReason = reason;
+    lease.updatedAt = now;
+    lease.version += 1;
+    const updatedRun = this.updateRun(run.id, { status: 'TIMED_OUT', finishedAt: now, updatedAt: now });
+    const taskBeforeRetry = this.updateTask(updatedRun.taskId, { status: 'FAILED', updatedAt: now });
+    const retryDecision = decideRetry(
+      'lease_expired',
+      { retryCount: taskBeforeRetry.retryCount, currentAttemptNo: updatedRun.attemptNo },
+      { maxRetries: taskBeforeRetry.maxRetries },
+    );
+    if (!retryDecision.shouldRetry) return { lease, run: updatedRun, task: taskBeforeRetry };
+    const retryRun = this.createRunAttempt(taskBeforeRetry, updatedRun, retryDecision.nextAttemptNo ?? updatedRun.attemptNo + 1, now);
+    const task = this.updateTask(taskBeforeRetry.id, {
+      status: 'QUEUED',
+      currentRunId: retryRun.id,
+      retryCount: retryDecision.nextRetryCount ?? taskBeforeRetry.retryCount + 1,
+      updatedAt: now,
+    });
+    return { lease, run: updatedRun, task, retryRun };
   }
 
   private getEventMap(runId: string): Map<number, RunEventRecord> {

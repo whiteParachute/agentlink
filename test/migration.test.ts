@@ -38,6 +38,15 @@ test('initial migration persists terminal complete replay hash on leases', () =>
   assert.match(sql, /terminal_payload_hash text/i);
 });
 
+test('initial migration persists agentlet control actions for ack and retention', () => {
+  const sql = loadInitialMigration();
+  assert.match(sql, /CREATE TABLE al_control_action/i);
+  assert.match(sql, /action_type text NOT NULL CHECK \(action_type IN \('cancel_run'\)\)/i);
+  assert.match(sql, /status text NOT NULL DEFAULT 'PENDING' CHECK \(status IN \('PENDING', 'ACKED'\)\)/i);
+  assert.match(sql, /UNIQUE \(device_id, action_type, lease_id\)/i);
+  assert.match(sql, /CREATE INDEX idx_al_control_action_device_status_created/i);
+});
+
 test('initial migration scopes artifacts by domain and hash', () => {
   const sql = loadInitialMigration();
   assert.match(sql, /CREATE TABLE al_artifact/i);

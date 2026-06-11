@@ -426,6 +426,16 @@ export class PostgreSqlRepository {
     return { lease: mapLease(row.lease), run: mapRun(row.run), task: mapTask(row.task) };
   }
 
+  async renewLease(leaseId: string): Promise<LeaseNextQueuedRunResult> {
+    const nowDate = this.now();
+    const now = nowDate.toISOString();
+    const expiresAt = new Date(nowDate.getTime() + this.leaseTtlMs).toISOString();
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.renewLease, [leaseId, now, expiresAt]);
+    if (result.rowCount === 0) throw new AgentlinkError(409, 'AL_STATE_CONFLICT', 'Lease must be ACKED or RENEWED and Run must be RUNNING');
+    const row = requireSingleRow(result, 'AL_INTERNAL', 'Renew returned rowCount without a row');
+    return { lease: mapLease(row.lease), run: mapRun(row.run), task: mapTask(row.task) };
+  }
+
   async appendAgentletProgress(input: { runId: string; leaseId: string; seq: number; eventType: string; payload?: JsonRecord }): Promise<RunEventRecord> {
     if (!Number.isInteger(input.seq) || input.seq <= 0) {
       throw new AgentlinkError(400, 'AL_EVENT_SEQ_INVALID', 'Progress seq must be a positive integer');
@@ -514,27 +524,26 @@ export class PostgreSqlRepository {
     });
   }
 
-  async cancelTask(taskId: string, reason = 'user_cancelled'): Promise<{ task: TaskRecord; run?: RunRecord; lease?: LeaseRecord }> {
-    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.cancelTask, [taskId, this.timestamp(), reason]);
+  async cancelTask(taskId: string, reason = 'user_cancelled'): Promise<{ task: TaskRecord; run?: RunRecord; lease?: LeaseRecord; controlAction?: ControlActionRecord }> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.cancelTask, [taskId, this.timestamp(), reason, randomUUID()]);
     if (result.rowCount === 0) throw new AgentlinkError(409, 'AL_STATE_CONFLICT', 'Task cannot be cancelled');
     const row = requireSingleRow(result, 'AL_INTERNAL', 'Cancel returned rowCount without a row');
-    const mapped: { task: TaskRecord; run?: RunRecord; lease?: LeaseRecord } = { task: mapTask(row.task) };
+    const mapped: { task: TaskRecord; run?: RunRecord; lease?: LeaseRecord; controlAction?: ControlActionRecord } = { task: mapTask(row.task) };
     if (row.run) mapped.run = mapRun(row.run);
     if (row.lease) mapped.lease = mapLease(row.lease);
+    if (row.control_action) mapped.controlAction = mapControlAction(row.control_action);
     return mapped;
   }
 
   async listControlActionsForDevice(deviceId: string, limit = 50): Promise<ControlActionRecord[]> {
     const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.listControlActionsForDevice, [deviceId, limit]);
-    return result.rows.map((row) => {
-      const lease = mapLease(row.lease);
-      return {
-        type: 'cancel_run',
-        runId: lease.runId,
-        leaseId: lease.id,
-        reason: lease.expireReason ?? 'user_cancelled',
-      };
-    });
+    return result.rows.map((row) => mapControlAction(row.control_action));
+  }
+
+  async ackControlAction(deviceId: string, actionId: string): Promise<ControlActionRecord> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.ackControlAction, [actionId, deviceId, this.timestamp()]);
+    if (result.rowCount === 0) throw new AgentlinkError(404, 'AL_CONTROL_ACTION_NOT_FOUND', 'Control action not found');
+    return mapControlAction(requireSingleRow(result, 'AL_INTERNAL', 'Control action ack returned rowCount without a row').control_action);
   }
 
   async listRecoverableRunsForDevice(deviceId: string, limit = 50): Promise<RecoverableRunRecord[]> {
@@ -551,6 +560,33 @@ export class PostgreSqlRepository {
         instruction: run.instruction,
         expiresAt: lease.expiresAt,
       };
+    });
+  }
+
+  async recoverContinue(leaseId: string, deviceId: string): Promise<LeaseNextQueuedRunResult> {
+    const nowDate = this.now();
+    const now = nowDate.toISOString();
+    const expiresAt = new Date(nowDate.getTime() + this.leaseTtlMs).toISOString();
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.recoverContinue, [leaseId, deviceId, now, expiresAt]);
+    if (result.rowCount === 0) throw new AgentlinkError(409, 'AL_LEASE_EXPIRED', 'Lease is not recoverable');
+    const row = requireSingleRow(result, 'AL_INTERNAL', 'Recover continue returned rowCount without a row');
+    return { lease: mapLease(row.lease), run: mapRun(row.run), task: mapTask(row.task) };
+  }
+
+  async recoverDiscard(leaseId: string, deviceId: string, reason = 'agentlet_recover_discard'): Promise<ExpireLeaseResult> {
+    return await withTransaction(this.client, async (tx) => {
+      const discarded = await tx.query<EnvelopeRow>(PostgreSqlStatements.recoverDiscard, [leaseId, deviceId, reason, this.timestamp()]);
+      if (discarded.rowCount === 0) throw new AgentlinkError(409, 'AL_LEASE_EXPIRED', 'Lease is not recoverable');
+      const row = requireSingleRow(discarded, 'AL_INTERNAL', 'Recover discard returned rowCount without a row');
+      const baseResult: ExpireLeaseResult = { lease: mapLease(row.lease), run: mapRun(row.run), task: mapTask(row.task) };
+      const retryDecision = decideRetry(
+        'lease_expired',
+        { retryCount: baseResult.task.retryCount, currentAttemptNo: baseResult.run.attemptNo },
+        { maxRetries: baseResult.task.maxRetries },
+      );
+      if (!retryDecision.shouldRetry) return baseResult;
+      const retry = await this.createRetryRunAttemptInTransaction(tx, baseResult.run.id, this.timestamp());
+      return retry ? { ...baseResult, task: retry.task, retryRun: retry.run } : baseResult;
     });
   }
 
@@ -586,6 +622,7 @@ interface EnvelopeRow {
   task?: unknown;
   run?: unknown;
   lease?: unknown;
+  control_action?: unknown;
   device?: unknown;
   runner?: unknown;
 }
@@ -697,6 +734,23 @@ function mapRunEvent(value: unknown): RunEventRecord {
     payload: readJsonRecord(row, 'payload'),
     emittedAt: readTimestamp(row, 'emitted_at'),
   };
+}
+
+function mapControlAction(value: unknown): ControlActionRecord {
+  const row = asRecord(value, 'control_action');
+  const record: ControlActionRecord = {
+    id: readString(row, 'id'),
+    type: readString(row, 'action_type') as ControlActionRecord['type'],
+    deviceId: readString(row, 'device_id'),
+    runId: readString(row, 'run_id'),
+    leaseId: readString(row, 'lease_id'),
+    reason: readString(row, 'reason'),
+    status: readString(row, 'status') as ControlActionRecord['status'],
+    createdAt: readTimestamp(row, 'created_at'),
+    updatedAt: readTimestamp(row, 'updated_at'),
+  };
+  setOptionalTimestamp(record, 'acknowledgedAt', row.acknowledged_at);
+  return record;
 }
 
 function mapDevice(value: unknown): DeviceRecord {

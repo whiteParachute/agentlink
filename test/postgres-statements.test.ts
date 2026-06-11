@@ -111,6 +111,15 @@ test('progress and complete statements require an acknowledged running active le
   assert.match(PostgreSqlStatements.completeRun, /END::al_task_status/i);
 });
 
+test('lease renew statement extends only acknowledged running leases', () => {
+  assert.match(PostgreSqlStatements.renewLease, /r\.status = 'RUNNING'/i);
+  assert.match(PostgreSqlStatements.renewLease, /r\.current_lease_id = l\.id/i);
+  assert.match(PostgreSqlStatements.renewLease, /l\.status IN \('ACKED', 'RENEWED'\)/i);
+  assert.match(PostgreSqlStatements.renewLease, /SET status = 'RENEWED'/i);
+  assert.match(PostgreSqlStatements.renewLease, /expires_at = \$3/i);
+  assert.match(PostgreSqlStatements.renewLease, /FOR UPDATE OF r, l/i);
+});
+
 test('terminal complete replay is scoped to the same run and lease', () => {
   assert.match(PostgreSqlStatements.replayTerminalComplete, /l\.id = \$2 AND l\.run_id = r\.id/i);
   assert.match(PostgreSqlStatements.replayTerminalComplete, /r\.id = \$1/i);
@@ -142,16 +151,28 @@ test('cancelTask can cancel current non-terminal task/run/lease without agentlet
   assert.match(PostgreSqlStatements.cancelTask, /l\.status IN \('ISSUED', 'ACKED', 'RENEWED'\)/i);
   assert.match(PostgreSqlStatements.cancelTask, /SET status = 'CANCELLED'/i);
   assert.match(PostgreSqlStatements.cancelTask, /LEFT JOIN updated_lease/i);
+  assert.match(PostgreSqlStatements.cancelTask, /INSERT INTO al_control_action/i);
+  assert.match(PostgreSqlStatements.cancelTask, /ON CONFLICT \(device_id, action_type, lease_id\)/i);
+  assert.match(PostgreSqlStatements.cancelTask, /row_to_json\(a\) AS control_action/i);
 });
 
 test('control poll and recover statements keep cancel and active recovery scopes explicit', () => {
-  assert.match(PostgreSqlStatements.listControlActionsForDevice, /l\.device_id = \$1/i);
-  assert.match(PostgreSqlStatements.listControlActionsForDevice, /l\.status = 'CANCELLED'/i);
-  assert.match(PostgreSqlStatements.listControlActionsForDevice, /r\.status = 'CANCELLED'/i);
+  assert.match(PostgreSqlStatements.listControlActionsForDevice, /FROM al_control_action a/i);
+  assert.match(PostgreSqlStatements.listControlActionsForDevice, /a\.device_id = \$1/i);
+  assert.match(PostgreSqlStatements.listControlActionsForDevice, /a\.status = 'PENDING'/i);
   assert.match(PostgreSqlStatements.listControlActionsForDevice, /LIMIT \$2/i);
+  assert.match(PostgreSqlStatements.ackControlAction, /FROM al_control_action a/i);
+  assert.match(PostgreSqlStatements.ackControlAction, /a\.id = \$1/i);
+  assert.match(PostgreSqlStatements.ackControlAction, /a\.device_id = \$2/i);
+  assert.match(PostgreSqlStatements.ackControlAction, /SET status = 'ACKED'/i);
 
   assert.match(PostgreSqlStatements.listRecoverableRunsForDevice, /l\.device_id = \$1/i);
   assert.match(PostgreSqlStatements.listRecoverableRunsForDevice, /l\.status IN \('ISSUED', 'ACKED', 'RENEWED'\)/i);
   assert.match(PostgreSqlStatements.listRecoverableRunsForDevice, /r\.current_lease_id = l\.id/i);
   assert.match(PostgreSqlStatements.listRecoverableRunsForDevice, /r\.status IN \('LEASED', 'RUNNING'\)/i);
+  assert.match(PostgreSqlStatements.recoverContinue, /l\.status IN \('ISSUED', 'ACKED', 'RENEWED'\)/i);
+  assert.match(PostgreSqlStatements.recoverContinue, /SET status = 'RENEWED'/i);
+  assert.match(PostgreSqlStatements.recoverContinue, /SET status = 'RUNNING'/i);
+  assert.match(PostgreSqlStatements.recoverDiscard, /SET status = 'EXPIRED'/i);
+  assert.match(PostgreSqlStatements.recoverDiscard, /SET status = 'TIMED_OUT'/i);
 });
