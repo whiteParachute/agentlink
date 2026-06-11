@@ -114,6 +114,7 @@ CREATE TABLE al_run_lease (
   completed_at timestamptz,
   cancelled_at timestamptz,
   expire_reason text,
+  terminal_payload_hash text,
   version integer NOT NULL DEFAULT 1 CHECK (version > 0),
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()

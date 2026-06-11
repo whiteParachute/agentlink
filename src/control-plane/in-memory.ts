@@ -300,7 +300,7 @@ export class InMemoryControlPlane {
     const lease = this.mustGetLease(input.leaseId);
     const terminalPayloadHash = hashStable({ status: input.status, result: input.result, error: input.error, metrics: input.metrics });
 
-    if (lease.terminalPayloadHash === terminalPayloadHash && isTerminalRunStatus(run.status)) {
+    if (lease.runId === run.id && lease.terminalPayloadHash === terminalPayloadHash && isTerminalRunStatus(run.status)) {
       return { run, task: this.mustGetTask(run.taskId), lease };
     }
     this.mustHaveExecutingLease(run, input.leaseId);

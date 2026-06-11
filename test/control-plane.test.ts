@@ -140,6 +140,30 @@ test('retryable failed completion creates a new queued run attempt', () => {
   );
 });
 
+
+
+test('terminal complete replay is scoped to the same run and lease', () => {
+  const { controlPlane, registered } = bootstrap();
+
+  const first = controlPlane.pull({ deviceId: registered.device.id, runnerId: registered.runner.id });
+  assert.ok(first);
+  controlPlane.ackLease(first.leaseId, true);
+  controlPlane.completeRun({ runId: first.runId, leaseId: first.leaseId, status: 'SUCCEEDED', result: { text: 'same' } });
+
+  const secondCreated = controlPlane.createTask(
+    { source: 'telegram', sourceRef: 'telegram:chat:second', payload: { text: 'same payload' } },
+    'idem-task-2',
+  );
+  const second = controlPlane.pull({ deviceId: registered.device.id, runnerId: registered.runner.id });
+  assert.ok(second);
+  controlPlane.ackLease(second.leaseId, true);
+  controlPlane.completeRun({ runId: second.runId, leaseId: second.leaseId, status: 'SUCCEEDED', result: { text: 'same' } });
+
+  assert.throws(
+    () => controlPlane.completeRun({ runId: secondCreated.run.id, leaseId: first.leaseId, status: 'SUCCEEDED', result: { text: 'same' } }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_LEASE_EXPIRED',
+  );
+});
 test('ack reject returns the run to QUEUED and permits a later lease', () => {
   const { controlPlane, registered, created } = bootstrap();
   const first = controlPlane.pull({ deviceId: registered.device.id, runnerId: registered.runner.id });

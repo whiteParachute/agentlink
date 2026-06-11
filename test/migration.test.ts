@@ -25,6 +25,11 @@ test('initial migration includes retry attempt fields', () => {
   assert.match(sql, /retry_of_run_id uuid REFERENCES al_run\(id\)/i);
 });
 
+test('initial migration persists terminal complete replay hash on leases', () => {
+  const sql = loadInitialMigration();
+  assert.match(sql, /terminal_payload_hash text/i);
+});
+
 test('initial migration scopes artifacts by domain and hash', () => {
   const sql = loadInitialMigration();
   assert.match(sql, /CREATE TABLE al_artifact/i);

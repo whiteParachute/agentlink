@@ -18,6 +18,7 @@ Telegram -> Agentlink Control Plane -> claw-tenc agentlet -> Codex CLI -> Telegr
 - Node.js 22 + TypeScript strict mode.
 - Built-in HTTP server with `/healthz`, `/readyz`, and `/api/v1/meta`.
 - In-memory control-plane repository for the first executable M1 slice.
+- PostgreSQL repository spike artifacts for the next AL-TD-002/005 slice: transaction helper, SQL contract statements, and optional migration smoke runner.
 - Minimal Task / Run / Lease / Device API loop:
   - `POST /api/v1/tasks`
   - `GET /api/v1/tasks/:taskId`
@@ -43,6 +44,7 @@ npm run typecheck
 npm test
 npm run check
 npm run build
+npm run db:smoke  # optional; runs only when AGENTLINK_DATABASE_URL is set
 npm start
 ```
 
@@ -55,3 +57,7 @@ git@github.com:whiteParachute/agentlink.git
 ```
 
 If the remote repository does not exist yet, create it under GitHub account `whiteParachute` before pushing.
+
+## PostgreSQL smoke
+
+`npm run db:smoke` is intentionally optional for local development and CI. When `AGENTLINK_DATABASE_URL` is unset it exits successfully with a skip message. When the variable is set, it requires `psql`, creates a temporary schema, applies `migrations/0001_initial.sql`, checks key schema invariants, and drops the schema.
