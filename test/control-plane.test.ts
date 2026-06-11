@@ -1,11 +1,17 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { InMemoryControlPlane } from '../src/control-plane/in-memory.js';
+import { DEFAULT_WORKSPACE, InMemoryControlPlane } from '../src/control-plane/in-memory.js';
 import { AgentlinkError } from '../src/control-plane/errors.js';
+
 
 function bootstrap() {
   const controlPlane = new InMemoryControlPlane({ now: () => new Date('2026-06-11T00:00:00.000Z') });
-  const registered = controlPlane.registerDevice({ displayName: 'claw-tenc', ownerUserId: 'whiteParachute' });
+  const registered = controlPlane.registerDevice({
+    displayName: 'claw-tenc',
+    ownerUserId: 'whiteParachute',
+    capabilityGrants: ['codex:exec'],
+    workdirGrants: [{ pathPrefix: DEFAULT_WORKSPACE, accessMode: 'read_write' }],
+  });
   controlPlane.heartbeat(registered.device.id, registered.deviceSecret);
   const created = controlPlane.createTask(
     { source: 'telegram', sourceRef: 'telegram:chat:msg', payload: { text: 'hello codex' } },
@@ -32,9 +38,74 @@ test('agentlet pull issues only one active lease for a queued run', () => {
   assert.ok(first);
   assert.equal(first.runId, created.run.id);
   assert.equal(controlPlane.getRun(created.run.id)?.status, 'LEASED');
+  assert.equal(typeof controlPlane.getRun(created.run.id)?.policyDecisionId, 'string');
+  assert.equal(controlPlane.getPolicyDecisions(created.run.id).at(-1)?.decision, 'ALLOW');
 
   const second = controlPlane.pull({ deviceId: registered.device.id, runnerId: registered.runner.id });
   assert.equal(second, undefined);
+});
+
+test('policy evaluation denies missing capability and workdir grants before leasing', () => {
+  const noCapabilityGrant = new InMemoryControlPlane({ now: () => new Date('2026-06-11T00:00:00.000Z') });
+  const registeredWithoutCapability = noCapabilityGrant.registerDevice({
+    displayName: 'claw-tenc',
+    ownerUserId: 'whiteParachute',
+    workdirGrants: [{ pathPrefix: DEFAULT_WORKSPACE, accessMode: 'read_write' }],
+  });
+  noCapabilityGrant.heartbeat(registeredWithoutCapability.device.id, registeredWithoutCapability.deviceSecret);
+  const capabilityDeniedTask = noCapabilityGrant.createTask(
+    { source: 'telegram', sourceRef: 'telegram:policy:capability', payload: { text: 'hello codex' } },
+    'idem-policy-capability',
+  );
+  assert.throws(
+    () => noCapabilityGrant.pull({ deviceId: registeredWithoutCapability.device.id, runnerId: registeredWithoutCapability.runner.id }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_CAPABILITY_DENIED',
+  );
+  assert.equal(noCapabilityGrant.getPolicyDecisions(capabilityDeniedTask.run.id).at(-1)?.decision, 'DENY');
+
+  const noWorkdirGrant = new InMemoryControlPlane({ now: () => new Date('2026-06-11T00:00:00.000Z') });
+  const registeredWithoutWorkdir = noWorkdirGrant.registerDevice({
+    displayName: 'claw-tenc',
+    ownerUserId: 'whiteParachute',
+    capabilityGrants: ['codex:exec'],
+  });
+  noWorkdirGrant.heartbeat(registeredWithoutWorkdir.device.id, registeredWithoutWorkdir.deviceSecret);
+  const workdirDeniedTask = noWorkdirGrant.createTask(
+    { source: 'telegram', sourceRef: 'telegram:policy:workdir', payload: { text: 'hello codex' } },
+    'idem-policy-workdir',
+  );
+  assert.throws(
+    () => noWorkdirGrant.pull({ deviceId: registeredWithoutWorkdir.device.id, runnerId: registeredWithoutWorkdir.runner.id }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_WORKDIR_DENIED',
+  );
+  assert.equal(noWorkdirGrant.getPolicyDecisions(workdirDeniedTask.run.id).at(-1)?.reason?.includes('workdir grants'), true);
+});
+
+test('policy evaluation denies network_scope mismatches', () => {
+  const controlPlane = new InMemoryControlPlane({ now: () => new Date('2026-06-11T00:00:00.000Z') });
+  const registered = controlPlane.registerDevice({
+    displayName: 'claw-tenc',
+    ownerUserId: 'whiteParachute',
+    networkScope: 'personal',
+    capabilityGrants: ['codex:exec'],
+    workdirGrants: [{ pathPrefix: DEFAULT_WORKSPACE, accessMode: 'read_write' }],
+  });
+  controlPlane.heartbeat(registered.device.id, registered.deviceSecret);
+  const created = controlPlane.createTask(
+    {
+      source: 'telegram',
+      sourceRef: 'telegram:policy:network',
+      payload: { text: 'hello codex' },
+      taskSpec: { network_scope: 'work' },
+    },
+    'idem-policy-network',
+  );
+
+  assert.throws(
+    () => controlPlane.pull({ deviceId: registered.device.id, runnerId: registered.runner.id }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_POLICY_DENIED',
+  );
+  assert.equal(controlPlane.getPolicyDecisions(created.run.id).at(-1)?.reason?.includes('network_scope'), true);
 });
 
 

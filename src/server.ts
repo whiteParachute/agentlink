@@ -106,12 +106,16 @@ async function handleRequest(
     const networkScope = optionalString(body, 'network_scope');
     const agentletVersion = optionalString(body, 'agentlet_version');
     const metadata = optionalRecord(body, 'metadata');
+    const capabilityGrants = optionalStringArray(body, 'capability_grants');
+    const workdirGrants = optionalWorkdirGrants(body, 'workdir_grants');
     const input: RegisterDeviceInput = {
       displayName: requireString(body, 'display_name'),
       ownerUserId: requireString(body, 'owner_user_id'),
       ...(networkScope ? { networkScope } : {}),
       ...(agentletVersion ? { agentletVersion } : {}),
       ...(metadata ? { metadata } : {}),
+      ...(capabilityGrants ? { capabilityGrants } : {}),
+      ...(workdirGrants ? { workdirGrants } : {}),
     };
     const result = controlPlane.registerDevice(input);
     sendJson(res, 201, {
@@ -247,6 +251,7 @@ function toRunDto(run: RunRecord) {
     attempt_no: run.attemptNo,
     instruction: run.instruction,
     current_lease_id: run.currentLeaseId,
+    policy_decision_id: run.policyDecisionId,
     result: run.result,
     error: run.error,
     metrics: run.metrics,
@@ -403,6 +408,25 @@ function optionalStringArray(body: JsonRecord, key: string): readonly string[] |
     throw new AgentlinkError(400, 'AL_BAD_REQUEST', `${key} must be an array of strings`);
   }
   return value;
+}
+
+function optionalWorkdirGrants(body: JsonRecord, key: string): RegisterDeviceInput['workdirGrants'] | undefined {
+  const value = body[key];
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) throw new AgentlinkError(400, 'AL_BAD_REQUEST', `${key} must be an array`);
+  return value.map((entry, index) => {
+    if (!isRecord(entry)) throw new AgentlinkError(400, 'AL_BAD_REQUEST', `${key}[${index}] must be an object`);
+    const pathPrefix = entry.path_prefix;
+    if (typeof pathPrefix !== 'string' || pathPrefix.length === 0) {
+      throw new AgentlinkError(400, 'AL_BAD_REQUEST', `${key}[${index}].path_prefix must be a non-empty string`);
+    }
+    const accessMode = entry.access_mode;
+    if (accessMode === undefined) return { pathPrefix };
+    if (accessMode !== 'read' && accessMode !== 'write' && accessMode !== 'read_write') {
+      throw new AgentlinkError(400, 'AL_BAD_REQUEST', `${key}[${index}].access_mode must be read, write, or read_write`);
+    }
+    return { pathPrefix, accessMode };
+  });
 }
 
 function isRecord(value: unknown): value is JsonRecord {

@@ -127,6 +127,53 @@ JOIN updated_run r ON r.id = l.run_id
 JOIN updated_task t ON t.id = r.task_id;
 `,
 
+  findActiveCapabilityGrantsForRunner: `
+SELECT *
+FROM al_capability_grant
+WHERE domain = $1
+  AND device_id = $2
+  AND runner_id = $3
+  AND capability = ANY($4::text[])
+  AND grant_status = 'GRANTED'
+  AND revoked_at IS NULL;
+`,
+
+  findActiveWorkdirGrantsForDevice: `
+SELECT *
+FROM al_workdir_grant
+WHERE domain = $1
+  AND device_id = $2
+  AND revoked_at IS NULL
+ORDER BY length(path_prefix) DESC;
+`,
+
+  insertPolicyDecision: `
+INSERT INTO al_policy_decision (
+  id,
+  domain,
+  task_id,
+  run_id,
+  device_id,
+  runner_id,
+  input,
+  decision,
+  reason,
+  created_at
+) VALUES (
+  $1,
+  $2,
+  $3,
+  $4,
+  $5,
+  $6,
+  $7::jsonb,
+  $8,
+  $9,
+  $10
+)
+RETURNING *;
+`,
+
   ackLeaseAccepted: `
 WITH target AS (
   SELECT l.id, l.run_id

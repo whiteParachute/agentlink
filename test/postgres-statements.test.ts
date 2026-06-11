@@ -29,6 +29,24 @@ test('leaseNextQueuedRun locks only queued run rows and relies on active lease d
   assert.match(sql, /current_lease_id = l\.id/i);
 });
 
+test('policy grant statements look up only active grants and persist policy decisions', () => {
+  assert.match(PostgreSqlStatements.findActiveCapabilityGrantsForRunner, /FROM al_capability_grant/i);
+  assert.match(PostgreSqlStatements.findActiveCapabilityGrantsForRunner, /device_id = \$2/i);
+  assert.match(PostgreSqlStatements.findActiveCapabilityGrantsForRunner, /runner_id = \$3/i);
+  assert.match(PostgreSqlStatements.findActiveCapabilityGrantsForRunner, /capability = ANY\(\$4::text\[\]\)/i);
+  assert.match(PostgreSqlStatements.findActiveCapabilityGrantsForRunner, /grant_status = 'GRANTED'/i);
+  assert.match(PostgreSqlStatements.findActiveCapabilityGrantsForRunner, /revoked_at IS NULL/i);
+
+  assert.match(PostgreSqlStatements.findActiveWorkdirGrantsForDevice, /FROM al_workdir_grant/i);
+  assert.match(PostgreSqlStatements.findActiveWorkdirGrantsForDevice, /device_id = \$2/i);
+  assert.match(PostgreSqlStatements.findActiveWorkdirGrantsForDevice, /revoked_at IS NULL/i);
+  assert.match(PostgreSqlStatements.findActiveWorkdirGrantsForDevice, /ORDER BY length\(path_prefix\) DESC/i);
+
+  assert.match(PostgreSqlStatements.insertPolicyDecision, /INSERT INTO al_policy_decision/i);
+  assert.match(PostgreSqlStatements.insertPolicyDecision, /decision/i);
+  assert.match(PostgreSqlStatements.insertPolicyDecision, /RETURNING \*/i);
+});
+
 test('ack statements require the lease state that the protocol allows', () => {
   assert.match(PostgreSqlStatements.ackLeaseAccepted, /l\.status = 'ISSUED'/i);
   assert.match(PostgreSqlStatements.ackLeaseAccepted, /r\.current_lease_id = l\.id/i);

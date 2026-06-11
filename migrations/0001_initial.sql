@@ -204,7 +204,13 @@ CREATE INDEX idx_al_run_lease_device_status_expires ON al_run_lease(device_id, s
 CREATE INDEX idx_al_device_domain_status ON al_device(domain, status);
 CREATE INDEX idx_al_runner_device_status ON al_runner(device_id, status);
 CREATE INDEX idx_al_capability_grant_lookup ON al_capability_grant(domain, capability, grant_status);
+CREATE INDEX idx_al_capability_grant_active_runner
+ON al_capability_grant(domain, device_id, runner_id, capability)
+WHERE grant_status = 'GRANTED' AND revoked_at IS NULL;
 CREATE INDEX idx_al_workdir_grant_device ON al_workdir_grant(domain, device_id);
+CREATE INDEX idx_al_workdir_grant_active_device
+ON al_workdir_grant(domain, device_id, path_prefix, access_mode)
+WHERE revoked_at IS NULL;
 CREATE INDEX idx_al_policy_decision_run ON al_policy_decision(run_id);
 CREATE INDEX idx_al_audit_log_domain_created ON al_audit_log(domain, created_at DESC);
 

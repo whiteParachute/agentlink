@@ -1,7 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
+import { DEFAULT_WORKSPACE } from '../src/control-plane/in-memory.js';
 import { createAgentlinkServer } from '../src/server.js';
+
 
 async function withServer(run: (baseUrl: string) => Promise<void>): Promise<void> {
   const server = createAgentlinkServer({ name: 'agentlink-test', version: '0.1.0-test', environment: 'test' });
@@ -53,6 +55,8 @@ test('HTTP M1 control-plane loop creates a task, leases it to an agentlet, and c
       display_name: 'claw-tenc',
       owner_user_id: 'whiteParachute',
       agentlet_version: 'test-agentlet',
+      capability_grants: ['codex:exec'],
+      workdir_grants: [{ path_prefix: DEFAULT_WORKSPACE, access_mode: 'read_write' }],
     });
     assert.equal(register.status, 201);
     const registered = (await register.json()) as { device_id: string; runner_id: string; device_secret: string };
@@ -130,7 +134,12 @@ test('agentlet endpoints require the matching device token', async () => {
 
 test('HTTP API rejects unacked progress and keeps external DTOs snake_case', async () => {
   await withServer(async (baseUrl) => {
-    const register = await postJson(baseUrl, '/api/v1/devices/register', { display_name: 'claw-tenc', owner_user_id: 'whiteParachute' });
+    const register = await postJson(baseUrl, '/api/v1/devices/register', {
+      display_name: 'claw-tenc',
+      owner_user_id: 'whiteParachute',
+      capability_grants: ['codex:exec'],
+      workdir_grants: [{ path_prefix: DEFAULT_WORKSPACE, access_mode: 'read_write' }],
+    });
     const registered = (await register.json()) as { device_id: string; runner_id: string; device_secret: string; device?: Record<string, unknown> };
     assert.equal(JSON.stringify(registered).includes('token_hash'), false);
     const auth = { authorization: `Bearer ${registered.device_secret}` };
@@ -179,9 +188,19 @@ test('HTTP API rejects unacked progress and keeps external DTOs snake_case', asy
 
 test('agentlet lease operations reject wrong tokens and cross-device lease access', async () => {
   await withServer(async (baseUrl) => {
-    const aRegister = await postJson(baseUrl, '/api/v1/devices/register', { display_name: 'claw-tenc-a', owner_user_id: 'whiteParachute' });
+    const aRegister = await postJson(baseUrl, '/api/v1/devices/register', {
+      display_name: 'claw-tenc-a',
+      owner_user_id: 'whiteParachute',
+      capability_grants: ['codex:exec'],
+      workdir_grants: [{ path_prefix: DEFAULT_WORKSPACE, access_mode: 'read_write' }],
+    });
     const a = (await aRegister.json()) as { device_id: string; runner_id: string; device_secret: string };
-    const bRegister = await postJson(baseUrl, '/api/v1/devices/register', { display_name: 'claw-tenc-b', owner_user_id: 'whiteParachute' });
+    const bRegister = await postJson(baseUrl, '/api/v1/devices/register', {
+      display_name: 'claw-tenc-b',
+      owner_user_id: 'whiteParachute',
+      capability_grants: ['codex:exec'],
+      workdir_grants: [{ path_prefix: DEFAULT_WORKSPACE, access_mode: 'read_write' }],
+    });
     const b = (await bRegister.json()) as { device_id: string; runner_id: string; device_secret: string };
     const authA = { authorization: `Bearer ${a.device_secret}` };
     const authB = { authorization: `Bearer ${b.device_secret}` };
@@ -198,6 +217,30 @@ test('agentlet lease operations reject wrong tokens and cross-device lease acces
     const crossDevice = await postJson(baseUrl, '/api/v1/agentlet/ack', { device_id: b.device_id, lease_id: pulled.lease_id, accepted: true }, authB);
     assert.equal(crossDevice.status, 403);
     assert.equal(((await crossDevice.json()) as { error: { code: string } }).error.code, 'AL_RUN_001');
+  });
+});
+
+test('HTTP agentlet pull returns policy errors for missing grants', async () => {
+  await withServer(async (baseUrl) => {
+    const register = await postJson(baseUrl, '/api/v1/devices/register', {
+      display_name: 'claw-tenc',
+      owner_user_id: 'whiteParachute',
+      workdir_grants: [{ path_prefix: DEFAULT_WORKSPACE, access_mode: 'read_write' }],
+    });
+    assert.equal(register.status, 201);
+    const registered = (await register.json()) as { device_id: string; runner_id: string; device_secret: string };
+    const auth = { authorization: `Bearer ${registered.device_secret}` };
+    await postJson(baseUrl, `/api/v1/devices/${registered.device_id}/heartbeat`, {}, auth);
+    await postJson(
+      baseUrl,
+      '/api/v1/tasks',
+      { source: 'telegram', source_ref: 'telegram:policy:missing-cap', payload: { text: 'run' } },
+      { 'idempotency-key': 'telegram:policy:missing-cap' },
+    );
+
+    const pull = await postJson(baseUrl, '/api/v1/agentlet/pull', { device_id: registered.device_id, runner_id: registered.runner_id }, auth);
+    assert.equal(pull.status, 403);
+    assert.equal(((await pull.json()) as { error: { code: string } }).error.code, 'AL_CAPABILITY_DENIED');
   });
 });
 

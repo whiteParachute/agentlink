@@ -1,14 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  CapabilityGrantRecord,
   DeviceRecord,
   Domain,
   JsonRecord,
   LeaseRecord,
+  PolicyDecisionRecord,
   RunEventRecord,
   RunRecord,
   RunnerRecord,
   TaskRecord,
+  WorkdirAccessMode,
+  WorkdirGrantRecord,
 } from '../domain/entities.js';
+import { evaluateDispatchPolicy } from '../domain/policy.js';
 import { decideRetry } from '../domain/retry.js';
 import { hashStable, stableStringify } from '../domain/signature.js';
 import type { LeaseStatus, RunStatus } from '../domain/status.js';
@@ -18,6 +23,7 @@ import { AgentlinkError } from './errors.js';
 export interface ControlPlaneOptions {
   now?: () => Date;
   leaseTtlMs?: number;
+  defaultWorkspace?: string;
 }
 
 export interface CreateTaskInput {
@@ -44,6 +50,11 @@ export interface RegisterDeviceInput {
     maxConcurrency?: number;
     capabilities?: readonly string[];
   };
+  capabilityGrants?: readonly string[];
+  workdirGrants?: readonly {
+    pathPrefix: string;
+    accessMode?: WorkdirAccessMode;
+  }[];
 }
 
 export interface PullInput {
@@ -80,10 +91,14 @@ interface IdempotencyEntry {
 export class InMemoryControlPlane {
   private readonly now: () => Date;
   private readonly leaseTtlMs: number;
+  private readonly defaultWorkspace: string;
   private readonly tasks = new Map<string, TaskRecord>();
   private readonly runs = new Map<string, RunRecord>();
   private readonly devices = new Map<string, DeviceRecord>();
   private readonly runners = new Map<string, RunnerRecord>();
+  private readonly capabilityGrants = new Map<string, CapabilityGrantRecord>();
+  private readonly workdirGrants = new Map<string, WorkdirGrantRecord>();
+  private readonly policyDecisions = new Map<string, PolicyDecisionRecord>();
   private readonly leases = new Map<string, LeaseRecord>();
   private readonly taskIdempotency = new Map<string, IdempotencyEntry>();
   private readonly events = new Map<string, Map<number, RunEventRecord>>();
@@ -91,6 +106,7 @@ export class InMemoryControlPlane {
   constructor(options: ControlPlaneOptions = {}) {
     this.now = options.now ?? (() => new Date());
     this.leaseTtlMs = options.leaseTtlMs ?? 5 * 60 * 1000;
+    this.defaultWorkspace = options.defaultWorkspace ?? DEFAULT_WORKSPACE;
   }
 
   createTask(input: CreateTaskInput, idempotencyKey: string): CreateTaskResult {
@@ -179,9 +195,79 @@ export class InMemoryControlPlane {
       updatedAt: now,
     };
 
+    for (const capability of input.capabilityGrants ?? []) {
+      if (!runner.capabilities.includes(capability)) {
+        throw new AgentlinkError(403, 'AL_CAPABILITY_DENIED', 'Capability must be declared before it can be granted');
+      }
+    }
+    for (const grant of input.workdirGrants ?? []) {
+      if (!grant.pathPrefix.startsWith('/')) {
+        throw new AgentlinkError(403, 'AL_WORKDIR_DENIED', 'Workdir grant path_prefix must be absolute');
+      }
+    }
+
     this.devices.set(device.id, device);
     this.runners.set(runner.id, runner);
+    for (const capability of input.capabilityGrants ?? []) {
+      this.grantCapability({ domain: device.domain, deviceId: device.id, runnerId: runner.id, capability, grantedBy: 'device_register' });
+    }
+    for (const grant of input.workdirGrants ?? []) {
+      this.grantWorkdir({ domain: device.domain, deviceId: device.id, pathPrefix: grant.pathPrefix, accessMode: grant.accessMode ?? 'read_write' });
+    }
     return { device, runner, deviceSecret };
+  }
+
+  grantCapability(input: {
+    domain?: Domain;
+    deviceId: string;
+    runnerId: string;
+    capability: string;
+    grantedBy: string;
+  }): CapabilityGrantRecord {
+    const now = this.timestamp();
+    const device = this.mustGetDevice(input.deviceId);
+    const runner = this.mustGetRunner(input.runnerId);
+    if (runner.deviceId !== device.id) {
+      throw new AgentlinkError(403, 'AL_POLICY_DENIED', 'Runner does not belong to device');
+    }
+    if (!runner.capabilities.includes(input.capability)) {
+      throw new AgentlinkError(403, 'AL_CAPABILITY_DENIED', 'Capability must be declared before it can be granted');
+    }
+    const grant: CapabilityGrantRecord = {
+      id: randomUUID(),
+      domain: input.domain ?? device.domain,
+      deviceId: device.id,
+      runnerId: runner.id,
+      capability: input.capability,
+      grantStatus: 'GRANTED',
+      grantedBy: input.grantedBy,
+      grantedAt: now,
+    };
+    this.capabilityGrants.set(grant.id, grant);
+    return grant;
+  }
+
+  grantWorkdir(input: {
+    domain?: Domain;
+    deviceId: string;
+    pathPrefix: string;
+    accessMode?: WorkdirAccessMode;
+  }): WorkdirGrantRecord {
+    const now = this.timestamp();
+    const device = this.mustGetDevice(input.deviceId);
+    if (!input.pathPrefix.startsWith('/')) {
+      throw new AgentlinkError(403, 'AL_WORKDIR_DENIED', 'Workdir grant path_prefix must be absolute');
+    }
+    const grant: WorkdirGrantRecord = {
+      id: randomUUID(),
+      domain: input.domain ?? device.domain,
+      deviceId: device.id,
+      pathPrefix: input.pathPrefix,
+      accessMode: input.accessMode ?? 'read_write',
+      createdAt: now,
+    };
+    this.workdirGrants.set(grant.id, grant);
+    return grant;
   }
 
   heartbeat(deviceId: string, deviceSecret: string): DeviceRecord {
@@ -204,13 +290,21 @@ export class InMemoryControlPlane {
       throw new AgentlinkError(403, 'AL_RUN_001', 'Runner is not available for this device');
     }
 
+    let denied: AgentlinkError | undefined;
     const run = [...this.runs.values()].find((candidate) => {
       if (candidate.domain !== device.domain || candidate.status !== 'QUEUED') return false;
       if (this.findActiveLease(candidate.id)) return false;
       const required = getRequiredCapabilities(candidate.instruction);
-      const supported = new Set(input.supportedCapabilities ?? runner.capabilities);
-      return required.every((capability) => supported.has(capability));
+      const supportedCapabilities = input.supportedCapabilities ?? runner.capabilities;
+      const policyDecision = this.evaluatePolicy(candidate, device, runner, required, supportedCapabilities);
+      if (policyDecision.decision === 'DENY') {
+        denied = new AgentlinkError(403, toExternalPolicyErrorCode(policyDecision.code), policyDecision.reason ?? 'Policy denied');
+        return false;
+      }
+      this.updateRun(candidate.id, { policyDecisionId: policyDecision.id, updatedAt: this.timestamp() });
+      return true;
     });
+    if (!run && denied) throw denied;
     if (!run) return undefined;
 
     const nowDate = this.now();
@@ -361,6 +455,10 @@ export class InMemoryControlPlane {
     return this.leases.get(leaseId);
   }
 
+  getPolicyDecisions(runId: string): PolicyDecisionRecord[] {
+    return [...this.policyDecisions.values()].filter((decision) => decision.runId === runId);
+  }
+
   getRunEvents(runId: string, afterSeq = 0): RunEventRecord[] {
     return [...this.getEventMap(runId).values()].filter((event) => event.seq > afterSeq).sort((a, b) => a.seq - b.seq);
   }
@@ -377,11 +475,14 @@ export class InMemoryControlPlane {
   }
 
   private buildDefaultInstruction(input: CreateTaskInput): JsonRecord {
+    const taskSpec = input.taskSpec ?? {};
     return {
       type: 'codex_session',
       prompt: typeof input.payload?.text === 'string' ? input.payload.text : '',
-      requiredCapabilities: ['codex:exec'],
-      workspace: '/data00/home/heyucong.bebop/self-codes/agentlink',
+      requiredCapabilities: getTaskSpecStringArray(taskSpec, 'requiredCapabilities') ?? getTaskSpecStringArray(taskSpec, 'required_capabilities') ?? ['codex:exec'],
+      workspace: getTaskSpecString(taskSpec, 'workspace') ?? getTaskSpecString(taskSpec, 'workdir') ?? this.defaultWorkspace,
+      networkScope: getTaskSpecString(taskSpec, 'networkScope') ?? getTaskSpecString(taskSpec, 'network_scope') ?? input.domain ?? 'personal',
+      workdirAccess: getTaskSpecWorkdirAccess(taskSpec) ?? 'read_write',
     };
   }
 
@@ -481,11 +582,83 @@ export class InMemoryControlPlane {
   private timestamp(): string {
     return this.now().toISOString();
   }
+
+  private evaluatePolicy(
+    run: RunRecord,
+    device: DeviceRecord,
+    runner: RunnerRecord,
+    requiredCapabilities: readonly string[],
+    supportedCapabilities: readonly string[],
+  ): PolicyDecisionRecord & { code?: 'AL_POLICY_DENIED' | 'AL_NETWORK_SCOPE_DENIED' | 'AL_CAPABILITY_UNDECLARED' | 'AL_CAPABILITY_UNSUPPORTED' | 'AL_CAPABILITY_DENIED' | 'AL_WORKDIR_DENIED' } {
+    const task = this.mustGetTask(run.taskId);
+    const evaluated = evaluateDispatchPolicy({
+      domain: run.domain,
+      deviceId: device.id,
+      runnerId: runner.id,
+      deviceNetworkScope: device.networkScope,
+      requestedNetworkScope: getRequestedNetworkScope(run.instruction, device.networkScope),
+      requiredCapabilities,
+      declaredCapabilities: runner.capabilities,
+      supportedCapabilities,
+      capabilityGrants: [...this.capabilityGrants.values()],
+      workspace: getWorkspace(run.instruction, this.defaultWorkspace),
+      requiredWorkdirAccess: getWorkdirAccess(run.instruction),
+      workdirGrants: [...this.workdirGrants.values()],
+    });
+    const decision: PolicyDecisionRecord & { code?: 'AL_POLICY_DENIED' | 'AL_NETWORK_SCOPE_DENIED' | 'AL_CAPABILITY_UNDECLARED' | 'AL_CAPABILITY_UNSUPPORTED' | 'AL_CAPABILITY_DENIED' | 'AL_WORKDIR_DENIED' } = {
+      id: randomUUID(),
+      domain: run.domain,
+      taskId: task.id,
+      runId: run.id,
+      deviceId: device.id,
+      runnerId: runner.id,
+      input: evaluated.input,
+      decision: evaluated.decision,
+      ...(evaluated.reason ? { reason: evaluated.reason } : {}),
+      ...(evaluated.code ? { code: evaluated.code } : {}),
+      createdAt: this.timestamp(),
+    };
+    this.policyDecisions.set(decision.id, decision);
+    return decision;
+  }
 }
 
 function getRequiredCapabilities(instruction: JsonRecord): string[] {
   const value = instruction.requiredCapabilities;
   return Array.isArray(value) && value.every((item) => typeof item === 'string') ? value : ['codex:exec'];
+}
+
+function getWorkspace(instruction: JsonRecord, fallback: string): string {
+  return typeof instruction.workspace === 'string' && instruction.workspace.length > 0 ? instruction.workspace : fallback;
+}
+
+function getRequestedNetworkScope(instruction: JsonRecord, fallback: string): string {
+  return typeof instruction.networkScope === 'string' && instruction.networkScope.length > 0 ? instruction.networkScope : fallback;
+}
+
+function getWorkdirAccess(instruction: JsonRecord): WorkdirAccessMode {
+  return instruction.workdirAccess === 'read' || instruction.workdirAccess === 'write' || instruction.workdirAccess === 'read_write' ? instruction.workdirAccess : 'read_write';
+}
+
+function getTaskSpecString(taskSpec: JsonRecord, key: string): string | undefined {
+  const value = taskSpec[key];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function getTaskSpecStringArray(taskSpec: JsonRecord, key: string): string[] | undefined {
+  const value = taskSpec[key];
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string') ? value : undefined;
+}
+
+function getTaskSpecWorkdirAccess(taskSpec: JsonRecord): WorkdirAccessMode | undefined {
+  const value = taskSpec.workdirAccess ?? taskSpec.workdir_access ?? taskSpec.access_mode;
+  return value === 'read' || value === 'write' || value === 'read_write' ? value : undefined;
+}
+
+function toExternalPolicyErrorCode(code: string | undefined): 'AL_POLICY_DENIED' | 'AL_CAPABILITY_DENIED' | 'AL_WORKDIR_DENIED' {
+  if (code === 'AL_WORKDIR_DENIED') return 'AL_WORKDIR_DENIED';
+  if (code === 'AL_CAPABILITY_DENIED' || code === 'AL_CAPABILITY_UNDECLARED' || code === 'AL_CAPABILITY_UNSUPPORTED') return 'AL_CAPABILITY_DENIED';
+  return 'AL_POLICY_DENIED';
 }
 
 function hashSecret(secret: string): string {
@@ -494,3 +667,5 @@ function hashSecret(secret: string): string {
 function removeUndefined<T extends object>(value: T): Partial<T> {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as Partial<T>;
 }
+
+export const DEFAULT_WORKSPACE = process.env.AGENTLINK_DEFAULT_WORKSPACE ?? process.cwd();

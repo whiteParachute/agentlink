@@ -276,11 +276,14 @@ interface EnvelopeRow {
 type RunEventRow = Record<string, unknown>;
 
 function buildDefaultInstruction(input: CreateTaskInput): JsonRecord {
+  const taskSpec = input.taskSpec ?? {};
   return {
     type: 'codex_session',
     prompt: typeof input.payload?.text === 'string' ? input.payload.text : '',
-    requiredCapabilities: ['codex:exec'],
-    workspace: '/data00/home/heyucong.bebop/self-codes/agentlink',
+    requiredCapabilities: getTaskSpecStringArray(taskSpec, 'requiredCapabilities') ?? getTaskSpecStringArray(taskSpec, 'required_capabilities') ?? ['codex:exec'],
+    workspace: getTaskSpecString(taskSpec, 'workspace') ?? getTaskSpecString(taskSpec, 'workdir') ?? DEFAULT_WORKSPACE,
+    networkScope: getTaskSpecString(taskSpec, 'networkScope') ?? getTaskSpecString(taskSpec, 'network_scope') ?? input.domain ?? 'personal',
+    workdirAccess: getTaskSpecWorkdirAccess(taskSpec) ?? 'read_write',
   };
 }
 
@@ -334,6 +337,7 @@ function mapRun(value: unknown): RunRecord {
   };
   setOptionalString(record, 'retryOfRunId', row.retry_of_run_id);
   setOptionalString(record, 'currentLeaseId', row.current_lease_id);
+  setOptionalString(record, 'policyDecisionId', row.policy_decision_id);
   setOptionalRecord(record, 'result', row.result);
   setOptionalRecord(record, 'error', row.error);
   setOptionalTimestamp(record, 'startedAt', row.started_at);
@@ -440,3 +444,20 @@ function setOptionalRecord<T extends object, K extends keyof T>(target: T, key: 
 function isUniqueViolation(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === '23505');
 }
+
+function getTaskSpecString(taskSpec: JsonRecord, key: string): string | undefined {
+  const value = taskSpec[key];
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function getTaskSpecStringArray(taskSpec: JsonRecord, key: string): string[] | undefined {
+  const value = taskSpec[key];
+  return Array.isArray(value) && value.every((entry) => typeof entry === 'string') ? value : undefined;
+}
+
+function getTaskSpecWorkdirAccess(taskSpec: JsonRecord): 'read' | 'write' | 'read_write' | undefined {
+  const value = taskSpec.workdirAccess ?? taskSpec.workdir_access ?? taskSpec.access_mode;
+  return value === 'read' || value === 'write' || value === 'read_write' ? value : undefined;
+}
+
+const DEFAULT_WORKSPACE = process.env.AGENTLINK_DEFAULT_WORKSPACE ?? process.cwd();

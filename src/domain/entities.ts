@@ -29,6 +29,7 @@ export interface RunRecord {
   instruction: JsonRecord;
   retryOfRunId?: string;
   currentLeaseId?: string;
+  policyDecisionId?: string;
   result?: JsonRecord;
   error?: JsonRecord;
   metrics: JsonRecord;
@@ -69,6 +70,43 @@ export interface RunnerRecord {
   capabilities: readonly string[];
   createdAt: string;
   updatedAt: string;
+}
+
+export interface CapabilityGrantRecord {
+  id: string;
+  domain: Domain;
+  deviceId: string;
+  runnerId: string;
+  capability: string;
+  grantStatus: 'GRANTED' | 'REVOKED';
+  grantedBy: string;
+  grantedAt: string;
+  revokedAt?: string;
+}
+
+export type WorkdirAccessMode = 'read' | 'write' | 'read_write';
+
+export interface WorkdirGrantRecord {
+  id: string;
+  domain: Domain;
+  deviceId: string;
+  pathPrefix: string;
+  accessMode: WorkdirAccessMode;
+  createdAt: string;
+  revokedAt?: string;
+}
+
+export interface PolicyDecisionRecord {
+  id: string;
+  domain: Domain;
+  taskId?: string;
+  runId?: string;
+  deviceId?: string;
+  runnerId?: string;
+  input: JsonRecord;
+  decision: 'ALLOW' | 'DENY';
+  reason?: string;
+  createdAt: string;
 }
 
 export interface LeaseRecord {

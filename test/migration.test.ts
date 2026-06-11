@@ -43,3 +43,15 @@ test('initial migration scopes artifacts by domain and hash', () => {
   assert.match(sql, /CREATE TABLE al_artifact/i);
   assert.match(sql, /PRIMARY KEY \(domain, hash\)/i);
 });
+
+test('initial migration includes active grant lookup indexes for AL-TD-003 policy checks', () => {
+  const sql = loadInitialMigration();
+  assert.match(sql, /CREATE TABLE al_capability_declared/i);
+  assert.match(sql, /CREATE TABLE al_capability_grant/i);
+  assert.match(sql, /CREATE TABLE al_workdir_grant/i);
+  assert.match(sql, /CREATE INDEX idx_al_capability_grant_active_runner/i);
+  assert.match(sql, /ON al_capability_grant\(domain, device_id, runner_id, capability\)/i);
+  assert.match(sql, /WHERE grant_status = 'GRANTED' AND revoked_at IS NULL/i);
+  assert.match(sql, /CREATE INDEX idx_al_workdir_grant_active_device/i);
+  assert.match(sql, /ON al_workdir_grant\(domain, device_id, path_prefix, access_mode\)/i);
+});
