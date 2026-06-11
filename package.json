@@ -22,7 +22,7 @@
     "agentlet",
     "codex"
   ],
-  "license": "UNLICENSED",
+  "license": "MIT",
   "devDependencies": {
     "@types/node": "^22.15.31",
     "typescript": "^5.8.3"
