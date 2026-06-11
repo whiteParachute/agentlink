@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import type {
   DeviceRecord,
   Domain,
@@ -10,6 +10,7 @@ import type {
   TaskRecord,
 } from '../domain/entities.js';
 import { decideRetry } from '../domain/retry.js';
+import { hashStable, stableStringify } from '../domain/signature.js';
 import type { LeaseStatus, RunStatus } from '../domain/status.js';
 import { isActiveLeaseStatus, isTerminalRunStatus } from '../domain/status.js';
 import { AgentlinkError } from './errors.js';
@@ -490,27 +491,6 @@ function getRequiredCapabilities(instruction: JsonRecord): string[] {
 function hashSecret(secret: string): string {
   return hashStable({ secret });
 }
-
-function hashStable(value: unknown): string {
-  return createHash('sha256').update(stableStringify(value)).digest('hex');
-}
-
-function stableStringify(value: unknown): string {
-  return JSON.stringify(sortJson(value));
-}
-
-function sortJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(sortJson);
-  if (value && typeof value === 'object') {
-    const sorted: Record<string, unknown> = {};
-    for (const key of Object.keys(value).sort()) {
-      sorted[key] = sortJson((value as Record<string, unknown>)[key]);
-    }
-    return sorted;
-  }
-  return value;
-}
-
 function removeUndefined<T extends object>(value: T): Partial<T> {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as Partial<T>;
 }

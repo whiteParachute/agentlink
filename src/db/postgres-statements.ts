@@ -7,8 +7,9 @@ import { ACTIVE_LEASE_STATUSES } from '../domain/status.js';
 // These statements are atomic repository building blocks. Higher-level service
 // logic owns retry policy, row-count-to-error mapping, and idempotency conflict
 // classification. In particular, appendAgentletProgress returns zero rows on
-// (run_id, seq) conflict; callers must query findAgentletProgressBySeq to decide
-// whether the conflict is an idempotent replay or AL_IDEMPOTENCY_CONFLICT.
+// (run_id, seq) conflict or stale lease state; callers must query
+// findAgentletProgressBySeq with the same active lease to distinguish an
+// idempotent replay from AL_IDEMPOTENCY_CONFLICT or AL_LEASE_EXPIRED.
 export const ACTIVE_LEASE_STATUSES_SQL = `(${ACTIVE_LEASE_STATUSES.map((status) => `'${status}'`).join(', ')})`;
 
 export const PostgreSqlStatements = {
@@ -127,55 +128,62 @@ JOIN updated_task t ON t.id = r.task_id;
 `,
 
   ackLeaseAccepted: `
-WITH target_lease AS (
+WITH target AS (
   SELECT l.id, l.run_id
   FROM al_run_lease l
+  JOIN al_run r ON r.id = l.run_id
   WHERE l.id = $1
     AND l.device_id = $2
     AND l.status = 'ISSUED'
-  FOR UPDATE
+    AND r.current_lease_id = l.id
+    AND r.status = 'LEASED'
+  FOR UPDATE OF l, r
 ), updated_lease AS (
   UPDATE al_run_lease l
   SET status = 'ACKED', acked_at = $3, updated_at = $3, version = l.version + 1
-  FROM target_lease target
+  FROM target
   WHERE l.id = target.id
   RETURNING l.*
 ), updated_run AS (
   -- started_at records the first successful execution start and is not overwritten by any accidental replay.
   UPDATE al_run r
   SET status = 'RUNNING', started_at = COALESCE(r.started_at, $3), updated_at = $3, version = r.version + 1
-  FROM updated_lease l
-  WHERE r.id = l.run_id
-    AND r.current_lease_id = l.id
-    AND r.status = 'LEASED'
+  FROM target
+  WHERE r.id = target.run_id
   RETURNING r.*
+), selected_task AS (
+  SELECT t.*
+  FROM al_task t
+  JOIN updated_run r ON r.task_id = t.id
 )
-SELECT row_to_json(l) AS lease, row_to_json(r) AS run
+SELECT row_to_json(l) AS lease, row_to_json(r) AS run, row_to_json(t) AS task
 FROM updated_lease l
-JOIN updated_run r ON r.id = l.run_id;
+JOIN updated_run r ON r.id = l.run_id
+JOIN selected_task t ON t.id = r.task_id;
 `,
 
   ackLeaseRejected: `
-WITH target_lease AS (
+WITH target AS (
   SELECT l.id, l.run_id
   FROM al_run_lease l
+  JOIN al_run r ON r.id = l.run_id
   WHERE l.id = $1
     AND l.device_id = $2
     AND l.status = 'ISSUED'
-  FOR UPDATE
+    AND r.current_lease_id = l.id
+    AND r.status = 'LEASED'
+  FOR UPDATE OF l, r
 ), updated_lease AS (
   UPDATE al_run_lease l
   SET status = 'REJECTED', expire_reason = $3, updated_at = $4, version = l.version + 1
-  FROM target_lease target
+  FROM target
   WHERE l.id = target.id
   RETURNING l.*
 ), updated_run AS (
   UPDATE al_run r
   SET status = 'QUEUED', current_lease_id = NULL, updated_at = $4, version = r.version + 1
-  FROM updated_lease l
-  WHERE r.id = l.run_id
-    AND r.current_lease_id = l.id
-    AND r.status = 'LEASED'
+  FROM target
+  WHERE r.id = target.run_id
   RETURNING r.*
 ), updated_task AS (
   UPDATE al_task t
@@ -204,22 +212,28 @@ RETURNING *;
 `,
 
   findAgentletProgressBySeq: `
-SELECT *
-FROM al_run_event
-WHERE run_id = $1
-  AND seq = $2;
+SELECT e.*
+FROM al_run_event e
+JOIN al_run r ON r.id = e.run_id
+JOIN al_run_lease l ON l.id = $3 AND l.run_id = r.id
+WHERE e.run_id = $1
+  AND e.seq = $2
+  AND r.status = 'RUNNING'
+  AND r.current_lease_id = l.id
+  AND l.status IN ('ACKED', 'RENEWED');
 `,
 
   completeRun: `
 WITH target AS (
   SELECT r.id AS run_id, r.task_id, r.domain, l.id AS lease_id
   FROM al_run r
+  JOIN al_task t ON t.id = r.task_id AND t.current_run_id = r.id
   JOIN al_run_lease l ON l.id = $2 AND l.run_id = r.id
   WHERE r.id = $1
     AND r.status = 'RUNNING'
     AND r.current_lease_id = l.id
     AND l.status IN ('ACKED', 'RENEWED')
-  FOR UPDATE OF r, l
+  FOR UPDATE OF r, l, t
 ), updated_lease AS (
   UPDATE al_run_lease l
   SET status = CASE WHEN $3 = 'CANCELLED' THEN 'CANCELLED' ELSE 'COMPLETED' END::al_lease_status,
@@ -269,6 +283,15 @@ JOIN al_task t ON t.id = r.task_id
 WHERE r.id = $1
   AND r.status IN ('SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT')
   AND l.terminal_payload_hash = $3;
+`,
+
+  findTerminalCompleteByRunLease: `
+SELECT row_to_json(r) AS run, row_to_json(l) AS lease, row_to_json(t) AS task
+FROM al_run r
+JOIN al_run_lease l ON l.id = $2 AND l.run_id = r.id
+JOIN al_task t ON t.id = r.task_id
+WHERE r.id = $1
+  AND r.status IN ('SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT');
 `,
 
   createRetryRunAttempt: `
