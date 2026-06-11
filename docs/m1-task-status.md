@@ -15,10 +15,10 @@ This document maps the reviewed M1 technical-design tasks (`AL-TD-*`) to the rep
 | Task | Design scope | Current status | Repository evidence | Remaining M1 work |
 | --- | --- | --- | --- | --- |
 | AL-TD-001 | Project skeleton, config, PostgreSQL migration, `domain` / `network_scope` baseline fields | Done | `f656f10` initialized repo/CI/config/server/migration; `1647109` kept the migration aligned with M1 naming; `.github/workflows/ci.yml`; `src/config/index.ts`; `migrations/0001_initial.sql`; `test/migration.test.ts` | Real PostgreSQL runtime/repository belongs to a later task, not AL-TD-001. |
-| AL-TD-002 | Canonical enums and Task / Run / Lease / Device state matrix | Partial | `src/domain/status.ts`; `test/status.test.ts`; in-memory transitions in `src/control-plane/in-memory.ts`; PostgreSQL statement contracts in `src/db/postgres-statements.ts` | DB-level enum/check usage exists in migration and SQL contracts; `src/db/postgres-repository.ts` now maps rowCount / replay / conflict cases to typed domain errors. Still missing real PostgreSQL client wiring, live DSN tests, and a standalone state-transition executor. |
+| AL-TD-002 | Canonical enums and Task / Run / Lease / Device state matrix | Partial | `src/domain/status.ts`; `test/status.test.ts`; in-memory transitions in `src/control-plane/in-memory.ts`; PostgreSQL statement contracts in `src/db/postgres-statements.ts` | DB-level enum/check usage exists in migration and SQL contracts; `src/db/postgres-repository.ts` now maps rowCount / replay / conflict cases to typed domain errors. Real PostgreSQL client wiring is now being introduced through the `pg` runtime slice. Still missing live DSN tests, concurrent DB verification, and a standalone state-transition executor. |
 | AL-TD-003 | Device / Runner / capability declared/grant and workdir grant | Partial | `al_device`, `al_runner`, `al_capability_declared`, `al_capability_grant`, `al_workdir_grant`; `src/domain/policy.ts`; in-memory capability/workdir grants; pull-time policy decisions; HTTP register-time grant seeding; policy SQL lookup contracts; AL_CAPABILITY_DENIED / AL_WORKDIR_DENIED tests | Still missing live PostgreSQL policy repository wiring, explicit grant management APIs, revoke/update APIs, and scheduler-level policy blocking semantics. |
 | AL-TD-004 | Task API + Main Agent MVP + `task_spec` | Partial | `POST /api/v1/tasks`; `GET /api/v1/tasks/:taskId`; task idempotency; M1 inline Main Agent shortcut documented in `STATE_TRANSITIONS.create_task`; `al_task.idempotency_signature`; `findTaskByIdempotencyKey`; `createTaskWithInitialRun` | Standalone Main Agent / TaskSpecBuilder component is not implemented; live repository adapter still needs to map idempotency signature mismatches to `AL_IDEMPOTENCY_CONFLICT`. |
-| AL-TD-005 | Run + `al_run_lease` + active lease partial unique index + pull/ack/renew | Partial | `al_run`, `al_run_lease`, `uq_al_run_lease_active`; `agentlet/pull`; `agentlet/ack`; lease tests; `src/db/transaction.ts`; `src/db/postgres-statements.ts`; `scripts/db-smoke.mjs`; `test/postgres-statements.test.ts`; `test/transaction.test.ts`; SQL contracts for lease, ack, progress, complete, replay, retry attempt, expiry, and cancel; `uq_al_run_task_attempt` DB backstop | `src/db/postgres-repository.ts` implements a dependency-free repository adapter over a checked-out `SqlClient`, including task idempotency, lease, ack, progress, complete replay, retry attempt, expiry, and cancel typed mappings. Remaining gaps: `renew` endpoint, concrete `pg` connection/pool wiring, and real concurrent pull / unique violation tests against a live DSN. |
+| AL-TD-005 | Run + `al_run_lease` + active lease partial unique index + pull/ack/renew | Partial | `al_run`, `al_run_lease`, `uq_al_run_lease_active`; `agentlet/pull`; `agentlet/ack`; lease tests; `src/db/transaction.ts`; `src/db/postgres-statements.ts`; `scripts/db-smoke.mjs`; `test/postgres-statements.test.ts`; `test/transaction.test.ts`; SQL contracts for lease, ack, progress, complete, replay, retry attempt, expiry, and cancel; `uq_al_run_task_attempt` DB backstop | `src/db/postgres-repository.ts` implements a dependency-free repository adapter over a checked-out `SqlClient`, including task idempotency, lease, ack, progress, complete replay, retry attempt, expiry, and cancel typed mappings. Remaining gaps: `renew` endpoint, full server-side PostgreSQL mode wiring, and real concurrent pull / unique violation tests against a live DSN. The `pg` client/pool adapter is now in progress. |
 | AL-TD-006 | `control_actions` / poll + recover + cancel | Partial | State matrix has planning entries for recover/cancel/revoke; `cancelTask` SQL contract covers external task cancel state updates | No HTTP protocol, control_actions polling, or runtime recover implementation yet. |
 | AL-TD-006B | Retry watcher, `attempt_no` / `retry_count` / `max_retries`, late-complete protection | Partial | `src/domain/retry.ts`; `completeRun(FAILED)` creates a new queued run attempt when retryable; `createRetryRunAttempt` and `expireActiveLease` SQL contracts; tests cover retryable failure and SQL retry/expiry predicates | Repository complete/expire paths now create retry attempts in the same transaction when retry policy allows. Live lease-expiry watcher, run-timeout watcher, and real late-complete race tests remain. |
 | AL-TD-007 | Codex Runner Adapter | Not started | None | Implement agentlet-side Codex adapter and local execution contract. |
@@ -44,8 +44,8 @@ This document maps the reviewed M1 technical-design tasks (`AL-TD-*`) to the rep
 
 ## Next recommended order
 
-1. Finish the remaining PostgreSQL runtime wiring for AL-TD-002 / AL-TD-005 when a concrete Postgres client/DSN strategy is approved: connect `PostgreSqlRepository` to a checked-out client/pool wrapper and add real concurrent pull tests.
-2. Add AL-TD-003 grant management/revoke APIs or wire the static evaluator into the future live PostgreSQL repository path.
+1. Finish the approved PostgreSQL runtime wiring for AL-TD-002 / AL-TD-005: keep `pg` as the runtime driver, connect `PostgreSqlRepository` through a checked-out client/pool wrapper, and add live DSN / concurrent pull tests.
+2. Add AL-TD-003 grant management/revoke APIs or wire the static evaluator into the live PostgreSQL repository path.
 3. Implement AL-TD-006 control actions / cancel / recover.
 4. Implement AL-TD-007 Codex Runner Adapter.
 5. Implement AL-TD-008 Telegram adapter and then run the first real end-to-end M1 loop.
@@ -54,7 +54,7 @@ This document maps the reviewed M1 technical-design tasks (`AL-TD-*`) to the rep
 
 - Added `src/db/transaction.ts` as the repository transaction boundary abstraction.
 - Added `src/db/postgres-statements.ts` to freeze the M1 PostgreSQL contracts for queued-run leasing, ack accept/reject, progress append, terminal complete, and terminal-complete replay.
-- Added `scripts/db-smoke.mjs` and `npm run db:smoke`; it is optional without `AGENTLINK_DATABASE_URL` and applies the migration inside a temporary schema when a DSN + `psql` are available.
+- Added `scripts/db-smoke.mjs` and `npm run db:smoke`; it is optional without `AGENTLINK_DATABASE_URL` and applies the migration through the `pg` runtime driver inside a temporary schema when a DSN is available.
 - Added tests for transaction commit/rollback, SQL row-lock / active-lease predicates, ACKED/RENEWED execution guards, terminal replay scoping, and `terminal_payload_hash` migration persistence.
 - Kept the task status as Partial because there is still no live PostgreSQL repository adapter, no real concurrent database test, and no `lease/renew` endpoint.
 
@@ -74,7 +74,7 @@ This document maps the reviewed M1 technical-design tasks (`AL-TD-*`) to the rep
 - Added typed rowCount/error mapping for task idempotency, active-lease-scoped progress replay/conflict/expired-lease classification, terminal complete replay, retry attempt creation, lease expiry, and cancel.
 - Kept retry creation inside the same transaction as `completeRun(FAILED)` / `expireActiveLease` when policy allows retry, preserving the Draft 3 “old terminal Run + new Run attempt” model.
 - Added `test/postgres-repository.test.ts` for repository mapping and transaction sequence invariants. Test count increased to 44.
-- Remaining gaps are runtime wiring, `pg` dependency / pool adapter decision, real `AGENTLINK_DATABASE_URL` integration tests, `lease/renew`, and concurrent `SKIP LOCKED` / partial unique index tests.
+- Remaining gaps are full server runtime wiring, real `AGENTLINK_DATABASE_URL` integration tests, `lease/renew`, and concurrent `SKIP LOCKED` / partial unique index tests. The `pg` dependency / pool adapter decision has been approved.
 
 ## 2026-06-11 AL-TD-003 policy/grant evaluator update
 
@@ -84,3 +84,13 @@ This document maps the reviewed M1 technical-design tasks (`AL-TD-*`) to the rep
 - Added PostgreSQL contract statements and active lookup indexes for capability/workdir grants plus policy decision insertion.
 - Added unit and HTTP tests for missing capability grants, missing workdir grants, network_scope mismatch, workdir prefix matching, and grant SQL/migration invariants. Test count increased to 52.
 - Remaining gaps are live PostgreSQL policy repository wiring, explicit grant/revoke APIs, and durable scheduler behavior for policy-denied queued runs.
+
+
+## 2026-06-11 PostgreSQL runtime dependency update
+
+- Added `pg` as the runtime PostgreSQL driver and `@types/pg` for TypeScript.
+- Added `src/db/pg-client.ts` with `PgSqlClient` and `PgRuntime`, plus `src/db/postgres-runtime.ts` to bind `PostgreSqlRepository` to a checked-out runtime client; the runtime always checks out one pool client before exposing it as `SqlClient`, preserving the transaction boundary required by `withTransaction`.
+- Added PostgreSQL runtime settings to `.env.example` and `src/config/index.ts`: `AGENTLINK_DATABASE_URL`, pool max, idle timeout, and connection timeout.
+- Updated `scripts/db-smoke.mjs` to use the `pg` runtime driver instead of shelling out to `psql`. The no-DSN path still skips successfully.
+- Added config and pg-runtime adapter tests. Test count increased to 58.
+- Remaining gaps: server boot still defaults to the in-memory control plane; live repository mode, live DSN repository tests, and concurrent lease tests are still pending.

@@ -3,6 +3,10 @@ export interface AgentlinkConfig {
   port: number;
   serviceName: string;
   environment: string;
+  databaseUrl?: string;
+  databasePoolMax: number;
+  databaseIdleTimeoutMs: number;
+  databaseConnectionTimeoutMs: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AgentlinkConfig {
@@ -11,6 +15,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AgentlinkConfi
     port: parseInteger(env.AGENTLINK_PORT, 8080),
     serviceName: env.AGENTLINK_SERVICE_NAME ?? 'agentlink-control-plane',
     environment: env.NODE_ENV ?? 'development',
+    ...(env.AGENTLINK_DATABASE_URL && env.AGENTLINK_DATABASE_URL.trim() !== '' ? { databaseUrl: env.AGENTLINK_DATABASE_URL } : {}),
+    databasePoolMax: parseInteger(env.AGENTLINK_DATABASE_POOL_MAX, 10),
+    databaseIdleTimeoutMs: parseInteger(env.AGENTLINK_DATABASE_IDLE_TIMEOUT_MS, 30_000),
+    databaseConnectionTimeoutMs: parseInteger(env.AGENTLINK_DATABASE_CONNECTION_TIMEOUT_MS, 5_000),
   };
 }
 

@@ -34,10 +34,10 @@ Agentlink is in early development. The repository currently contains:
 - a Node.js 22 + TypeScript control-plane skeleton;
 - a minimal HTTP API for tasks, devices, leases, progress, and completion;
 - an in-memory implementation for executable protocol tests;
-- PostgreSQL schema and SQL contract spikes for future repository work;
+- PostgreSQL schema, SQL contracts, repository adapter, and `pg` runtime adapter scaffolding;
 - GitHub Actions CI and Node built-in tests.
 
-Not yet included: a live PostgreSQL repository adapter, Telegram adapter, device agentlet daemon, Codex runner adapter, or production deployment guide.
+Not yet included: full live PostgreSQL server wiring, Telegram adapter, device agentlet daemon, Codex runner adapter, or production deployment guide.
 
 ## Quick start
 
@@ -70,7 +70,7 @@ npm run build
 npm run db:smoke
 ```
 
-The project intentionally keeps runtime dependencies minimal while the protocol and repository boundaries are still being shaped.
+Runtime dependencies are intentionally small; `pg` is included because PostgreSQL is the control-plane source of truth for deployable M1 state.
 
 ## License
 
