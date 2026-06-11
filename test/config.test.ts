@@ -6,6 +6,7 @@ test('loadConfig exposes PostgreSQL runtime settings without requiring a DSN', (
   const config = loadConfig({});
 
   assert.equal(config.databaseUrl, undefined);
+  assert.equal(config.storage, 'memory');
   assert.equal(config.databasePoolMax, 10);
   assert.equal(config.databaseIdleTimeoutMs, 30_000);
   assert.equal(config.databaseConnectionTimeoutMs, 5_000);
@@ -14,13 +15,19 @@ test('loadConfig exposes PostgreSQL runtime settings without requiring a DSN', (
 test('loadConfig reads PostgreSQL runtime settings from env', () => {
   const config = loadConfig({
     AGENTLINK_DATABASE_URL: 'postgres://localhost/agentlink',
+    AGENTLINK_STORAGE: 'postgres',
     AGENTLINK_DATABASE_POOL_MAX: '3',
     AGENTLINK_DATABASE_IDLE_TIMEOUT_MS: '4000',
     AGENTLINK_DATABASE_CONNECTION_TIMEOUT_MS: '2000',
   });
 
   assert.equal(config.databaseUrl, 'postgres://localhost/agentlink');
+  assert.equal(config.storage, 'postgres');
   assert.equal(config.databasePoolMax, 3);
   assert.equal(config.databaseIdleTimeoutMs, 4_000);
   assert.equal(config.databaseConnectionTimeoutMs, 2_000);
+});
+
+test('loadConfig rejects unknown storage modes', () => {
+  assert.throws(() => loadConfig({ AGENTLINK_STORAGE: 'sqlite' }), /Invalid AGENTLINK_STORAGE/);
 });

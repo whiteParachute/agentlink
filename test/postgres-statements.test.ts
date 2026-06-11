@@ -29,6 +29,34 @@ test('leaseNextQueuedRun locks only queued run rows and relies on active lease d
   assert.match(sql, /current_lease_id = l\.id/i);
 });
 
+test('live repository dispatch statements preserve policy-before-lease and checked active lease boundaries', () => {
+  assert.match(PostgreSqlStatements.findDispatchCandidates, /r\.status = 'QUEUED'/i);
+  assert.match(PostgreSqlStatements.findDispatchCandidates, /ORDER BY r\.created_at ASC, r\.id ASC/i);
+
+  const sql = getPostgreSqlStatement('leaseSpecificQueuedRun');
+  assert.match(sql, /r\.id = \$1/i);
+  assert.match(sql, /d\.id = \$2/i);
+  assert.match(sql, /runner\.id = \$3/i);
+  assert.match(sql, /FOR UPDATE OF r SKIP LOCKED/i);
+  assert.match(sql, /active_lease\.status IN \('ISSUED', 'ACKED', 'RENEWED'\)/i);
+  assert.match(sql, /policy_decision_id = \$8/i);
+  assert.match(sql, /SET status = 'LEASED'/i);
+});
+
+test('device runtime statements register, authenticate, and heartbeat devices without exposing secrets', () => {
+  assert.match(PostgreSqlStatements.insertDevice, /token_hash/i);
+  assert.match(PostgreSqlStatements.insertDevice, /status,/i);
+  assert.match(PostgreSqlStatements.insertRunner, /INSERT INTO al_runner/i);
+  assert.match(PostgreSqlStatements.insertCapabilityDeclared, /ON CONFLICT \(device_id, runner_id, name, scope\)/i);
+  assert.match(PostgreSqlStatements.insertCapabilityGrant, /grant_status/i);
+  assert.match(PostgreSqlStatements.insertWorkdirGrant, /path_prefix/i);
+  assert.match(PostgreSqlStatements.findDeviceById, /WHERE d\.id = \$1/i);
+  assert.match(PostgreSqlStatements.findRunnerById, /json_agg\(cd\.name ORDER BY cd\.name\)/i);
+  assert.match(PostgreSqlStatements.heartbeatDevice, /status = 'ONLINE'/i);
+  assert.match(PostgreSqlStatements.heartbeatDevice, /last_heartbeat_at = \$2/i);
+  assert.match(PostgreSqlStatements.heartbeatDevice, /status <> 'REVOKED'/i);
+});
+
 test('policy grant statements look up only active grants and persist policy decisions', () => {
   assert.match(PostgreSqlStatements.findActiveCapabilityGrantsForRunner, /FROM al_capability_grant/i);
   assert.match(PostgreSqlStatements.findActiveCapabilityGrantsForRunner, /device_id = \$2/i);

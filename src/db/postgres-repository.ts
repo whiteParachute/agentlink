@@ -1,7 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import { AgentlinkError } from '../control-plane/errors.js';
 import type { CreateTaskInput } from '../control-plane/in-memory.js';
-import type { Domain, JsonRecord, LeaseRecord, RunEventRecord, RunRecord, TaskRecord } from '../domain/entities.js';
+import type {
+  CapabilityGrantRecord,
+  DeviceRecord,
+  Domain,
+  JsonRecord,
+  LeaseRecord,
+  PolicyDecisionRecord,
+  RunEventRecord,
+  RunRecord,
+  RunnerRecord,
+  TaskRecord,
+  WorkdirAccessMode,
+  WorkdirGrantRecord,
+} from '../domain/entities.js';
+import { evaluateDispatchPolicy } from '../domain/policy.js';
 import { decideRetry } from '../domain/retry.js';
 import { hashStable, stableStringify } from '../domain/signature.js';
 import type { RunStatus } from '../domain/status.js';
@@ -48,6 +62,34 @@ export interface CompleteRunResult {
   retryRun?: RunRecord;
 }
 
+export interface RegisterDeviceRepositoryInput {
+  domain?: Domain;
+  displayName: string;
+  ownerUserId: string;
+  networkScope?: string;
+  trustLevel?: DeviceRecord['trustLevel'];
+  agentletVersion?: string;
+  metadata?: JsonRecord;
+  runner?: {
+    runnerType?: string;
+    runnerVersion?: string;
+    model?: string;
+    maxConcurrency?: number;
+    capabilities?: readonly string[];
+  };
+  capabilityGrants?: readonly string[];
+  workdirGrants?: readonly {
+    pathPrefix: string;
+    accessMode?: WorkdirAccessMode;
+  }[];
+}
+
+export interface RegisterDeviceRepositoryResult {
+  device: DeviceRecord;
+  runner: RunnerRecord;
+  deviceSecret: string;
+}
+
 export interface ExpireLeaseResult {
   run: RunRecord;
   task: TaskRecord;
@@ -62,6 +104,122 @@ export class PostgreSqlRepository {
   constructor(private readonly client: SqlClient, options: PostgreSqlRepositoryOptions = {}) {
     this.now = options.now ?? (() => new Date());
     this.leaseTtlMs = options.leaseTtlMs ?? 5 * 60 * 1000;
+  }
+
+  async getTask(taskId: string): Promise<{ task: TaskRecord; run?: RunRecord } | undefined> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.findTaskById, [taskId]);
+    if (result.rowCount === 0) return undefined;
+    const row = requireSingleRow(result, 'AL_INTERNAL', 'Task lookup returned rowCount without a row');
+    const mapped: { task: TaskRecord; run?: RunRecord } = { task: mapTask(row.task) };
+    if (row.run) mapped.run = mapRun(row.run);
+    return mapped;
+  }
+
+  async getRun(runId: string): Promise<RunRecord | undefined> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.findRunById, [runId]);
+    if (result.rowCount === 0) return undefined;
+    return mapRun(requireSingleRow(result, 'AL_INTERNAL', 'Run lookup returned rowCount without a row').run);
+  }
+
+  async getLease(leaseId: string): Promise<LeaseRecord | undefined> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.findLeaseById, [leaseId]);
+    if (result.rowCount === 0) return undefined;
+    return mapLease(requireSingleRow(result, 'AL_INTERNAL', 'Lease lookup returned rowCount without a row').lease);
+  }
+
+  async getRunEvents(runId: string, afterSeq = 0): Promise<RunEventRecord[]> {
+    const result = await this.client.query<RunEventRow>(PostgreSqlStatements.listRunEvents, [runId, afterSeq]);
+    return result.rows.map(mapRunEvent);
+  }
+
+  async registerDevice(input: RegisterDeviceRepositoryInput): Promise<RegisterDeviceRepositoryResult> {
+    const domain = input.domain ?? 'personal';
+    const runnerInput = input.runner ?? {};
+    const capabilities = runnerInput.capabilities ?? ['codex:exec'];
+    for (const capability of input.capabilityGrants ?? []) {
+      if (!capabilities.includes(capability)) {
+        throw new AgentlinkError(403, 'AL_CAPABILITY_DENIED', 'Capability must be declared before it can be granted');
+      }
+    }
+    for (const grant of input.workdirGrants ?? []) {
+      if (!grant.pathPrefix.startsWith('/')) {
+        throw new AgentlinkError(403, 'AL_WORKDIR_DENIED', 'Workdir grant path_prefix must be absolute');
+      }
+    }
+
+    return await withTransaction(this.client, async (tx) => {
+      const now = this.timestamp();
+      const deviceSecret = `al_dev_${randomUUID().replaceAll('-', '')}`;
+      const deviceId = randomUUID();
+      const runnerId = randomUUID();
+      const device = mapDevice(requireSingleRow(
+        await tx.query<EnvelopeRow>(PostgreSqlStatements.insertDevice, [
+          deviceId,
+          domain,
+          input.displayName,
+          hashSecret(deviceSecret),
+          input.networkScope ?? 'personal',
+          input.ownerUserId,
+          input.trustLevel ?? 'standard',
+          input.agentletVersion ?? null,
+          toJsonbParam(input.metadata ?? {}),
+          now,
+        ]),
+        'AL_INTERNAL',
+        'Device insert returned no row',
+      ));
+      const runner = mapRunner(requireSingleRow(
+        await tx.query<EnvelopeRow>(PostgreSqlStatements.insertRunner, [
+          runnerId,
+          device.id,
+          runnerInput.runnerType ?? 'codex',
+          runnerInput.runnerVersion ?? null,
+          runnerInput.model ?? null,
+          runnerInput.maxConcurrency ?? 1,
+          now,
+        ]),
+        'AL_INTERNAL',
+        'Runner insert returned no row',
+      ), capabilities);
+
+      for (const capability of capabilities) {
+        await tx.query(PostgreSqlStatements.insertCapabilityDeclared, [device.id, runner.id, capability, 'runner', now]);
+      }
+      for (const capability of input.capabilityGrants ?? []) {
+        await tx.query(PostgreSqlStatements.insertCapabilityGrant, [randomUUID(), domain, device.id, runner.id, capability, 'device_register', now]);
+      }
+      for (const grant of input.workdirGrants ?? []) {
+        await tx.query(PostgreSqlStatements.insertWorkdirGrant, [randomUUID(), domain, device.id, grant.pathPrefix, grant.accessMode ?? 'read_write', now]);
+      }
+      return { device, runner, deviceSecret };
+    });
+  }
+
+  async getDevice(deviceId: string): Promise<DeviceRecord | undefined> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.findDeviceById, [deviceId]);
+    if (result.rowCount === 0) return undefined;
+    return mapDevice(requireSingleRow(result, 'AL_INTERNAL', 'Device lookup returned rowCount without a row').device);
+  }
+
+  async getRunner(runnerId: string): Promise<RunnerRecord | undefined> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.findRunnerById, [runnerId]);
+    if (result.rowCount === 0) return undefined;
+    return mapRunner(requireSingleRow(result, 'AL_INTERNAL', 'Runner lookup returned rowCount without a row').runner);
+  }
+
+  async authenticateDevice(deviceId: string, deviceSecret: string): Promise<DeviceRecord> {
+    const device = await this.getDevice(deviceId);
+    if (!device) throw new AgentlinkError(404, 'AL_DEVICE_NOT_FOUND', 'Device not found');
+    if (device.status === 'REVOKED') throw new AgentlinkError(401, 'AL_TOKEN_REVOKED', 'Device token was revoked');
+    if (device.tokenHash !== hashSecret(deviceSecret)) throw new AgentlinkError(401, 'AL_AUTH_INVALID', 'Invalid device token');
+    return device;
+  }
+
+  async heartbeat(deviceId: string, deviceSecret: string): Promise<DeviceRecord> {
+    await this.authenticateDevice(deviceId, deviceSecret);
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.heartbeatDevice, [deviceId, this.timestamp()]);
+    if (result.rowCount === 0) throw new AgentlinkError(401, 'AL_TOKEN_REVOKED', 'Device token was revoked');
+    return mapDevice(requireSingleRow(result, 'AL_INTERNAL', 'Heartbeat returned rowCount without a row'));
   }
 
   async createTaskWithInitialRun(input: CreateTaskInput, idempotencyKey: string): Promise<CreateTaskRepositoryResult> {
@@ -110,6 +268,76 @@ export class PostgreSqlRepository {
     }
   }
 
+  async pullNextPolicyApprovedRun(input: LeaseNextQueuedRunInput & { supportedCapabilities?: readonly string[] }): Promise<LeaseNextQueuedRunResult | undefined> {
+    const device = await this.getDevice(input.deviceId);
+    if (!device) throw new AgentlinkError(404, 'AL_DEVICE_NOT_FOUND', 'Device not found');
+    if (device.status !== 'ONLINE') throw new AgentlinkError(503, 'AL_DEVICE_OFFLINE', 'Device must be ONLINE before pulling work');
+    const runner = await this.getRunner(input.runnerId);
+    if (!runner || runner.deviceId !== device.id || runner.status !== 'online') {
+      throw new AgentlinkError(403, 'AL_RUN_001', 'Runner is not available for this device');
+    }
+
+    const candidates = await this.client.query<EnvelopeRow>(PostgreSqlStatements.findDispatchCandidates, [input.domain ?? device.domain, 10]);
+    let denied: AgentlinkError | undefined;
+    for (const row of candidates.rows) {
+      const run = mapRun(row.run);
+      const task = mapTask(row.task);
+      const requiredCapabilities = getRequiredCapabilities(run.instruction);
+      const supportedCapabilities = input.supportedCapabilities ?? runner.capabilities;
+      const capabilityGrants = await this.findActiveCapabilityGrantsForRunner(run.domain, device.id, runner.id, requiredCapabilities);
+      const workdirGrants = await this.findActiveWorkdirGrantsForDevice(run.domain, device.id);
+      const evaluated = evaluateDispatchPolicy({
+        domain: run.domain,
+        deviceId: device.id,
+        runnerId: runner.id,
+        deviceNetworkScope: device.networkScope,
+        requestedNetworkScope: getRequestedNetworkScope(run.instruction, device.networkScope),
+        requiredCapabilities,
+        declaredCapabilities: runner.capabilities,
+        supportedCapabilities,
+        capabilityGrants,
+        workspace: getWorkspace(run.instruction, DEFAULT_WORKSPACE),
+        requiredWorkdirAccess: getWorkdirAccess(run.instruction),
+        workdirGrants,
+      });
+      const policyInput: {
+        domain: Domain;
+        taskId: string;
+        runId: string;
+        deviceId: string;
+        runnerId: string;
+        input: JsonRecord;
+        decision: 'ALLOW' | 'DENY';
+        reason?: string;
+      } = {
+        domain: run.domain,
+        taskId: task.id,
+        runId: run.id,
+        deviceId: device.id,
+        runnerId: runner.id,
+        input: evaluated.input,
+        decision: evaluated.decision,
+      };
+      if (evaluated.reason) policyInput.reason = evaluated.reason;
+      const decision = await this.insertPolicyDecision(policyInput);
+      if (evaluated.decision === 'DENY') {
+        denied = new AgentlinkError(403, toExternalPolicyErrorCode(evaluated.code), evaluated.reason ?? 'Policy denied');
+        continue;
+      }
+
+      const leased = await this.leaseSpecificQueuedRun({
+        runId: run.id,
+        deviceId: device.id,
+        runnerId: runner.id,
+        domain: run.domain,
+        policyDecisionId: decision.id,
+      });
+      if (leased) return leased;
+    }
+    if (denied) throw denied;
+    return undefined;
+  }
+
   async leaseNextQueuedRun(input: LeaseNextQueuedRunInput): Promise<LeaseNextQueuedRunResult | undefined> {
     const nowDate = this.now();
     const now = nowDate.toISOString();
@@ -125,6 +353,61 @@ export class PostgreSqlRepository {
     if (result.rowCount === 0) return undefined;
     const row = requireSingleRow(result, 'AL_INTERNAL', 'Lease query returned rowCount without a row');
     return { lease: mapLease(row.lease), run: mapRun(row.run), task: mapTask(row.task) };
+  }
+
+  async leaseSpecificQueuedRun(input: { runId: string; deviceId: string; runnerId: string; domain: Domain; policyDecisionId?: string }): Promise<LeaseNextQueuedRunResult | undefined> {
+    const nowDate = this.now();
+    const now = nowDate.toISOString();
+    const expiresAt = new Date(nowDate.getTime() + this.leaseTtlMs).toISOString();
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.leaseSpecificQueuedRun, [
+      input.runId,
+      input.deviceId,
+      input.runnerId,
+      input.domain,
+      randomUUID(),
+      now,
+      expiresAt,
+      input.policyDecisionId ?? null,
+    ]);
+    if (result.rowCount === 0) return undefined;
+    const row = requireSingleRow(result, 'AL_INTERNAL', 'Specific lease query returned rowCount without a row');
+    return { lease: mapLease(row.lease), run: mapRun(row.run), task: mapTask(row.task) };
+  }
+
+  async findActiveCapabilityGrantsForRunner(domain: Domain, deviceId: string, runnerId: string, capabilities: readonly string[]): Promise<CapabilityGrantRecord[]> {
+    if (capabilities.length === 0) return [];
+    const result = await this.client.query<Record<string, unknown>>(PostgreSqlStatements.findActiveCapabilityGrantsForRunner, [domain, deviceId, runnerId, capabilities]);
+    return result.rows.map(mapCapabilityGrant);
+  }
+
+  async findActiveWorkdirGrantsForDevice(domain: Domain, deviceId: string): Promise<WorkdirGrantRecord[]> {
+    const result = await this.client.query<Record<string, unknown>>(PostgreSqlStatements.findActiveWorkdirGrantsForDevice, [domain, deviceId]);
+    return result.rows.map(mapWorkdirGrant);
+  }
+
+  async insertPolicyDecision(input: {
+    domain: Domain;
+    taskId?: string;
+    runId?: string;
+    deviceId?: string;
+    runnerId?: string;
+    input: JsonRecord;
+    decision: 'ALLOW' | 'DENY';
+    reason?: string;
+  }): Promise<PolicyDecisionRecord> {
+    const result = await this.client.query<Record<string, unknown>>(PostgreSqlStatements.insertPolicyDecision, [
+      randomUUID(),
+      input.domain,
+      input.taskId ?? null,
+      input.runId ?? null,
+      input.deviceId ?? null,
+      input.runnerId ?? null,
+      toJsonbParam(input.input),
+      input.decision,
+      input.reason ?? null,
+      this.timestamp(),
+    ]);
+    return mapPolicyDecision(requireSingleRow(result, 'AL_INTERNAL', 'Policy decision insert returned rowCount without a row'));
   }
 
   async ackLeaseAccepted(leaseId: string, deviceId: string): Promise<LeaseNextQueuedRunResult> {
@@ -271,6 +554,8 @@ interface EnvelopeRow {
   task?: unknown;
   run?: unknown;
   lease?: unknown;
+  device?: unknown;
+  runner?: unknown;
 }
 
 type RunEventRow = Record<string, unknown>;
@@ -382,6 +667,91 @@ function mapRunEvent(value: unknown): RunEventRecord {
   };
 }
 
+function mapDevice(value: unknown): DeviceRecord {
+  const row = asRecord(value, 'device');
+  const record: DeviceRecord = {
+    id: readString(row, 'id'),
+    domain: readDomain(row, 'domain'),
+    displayName: readString(row, 'display_name'),
+    tokenHash: readString(row, 'token_hash'),
+    networkScope: readString(row, 'network_scope'),
+    ownerUserId: readString(row, 'owner_user_id'),
+    trustLevel: readString(row, 'trust_level') as DeviceRecord['trustLevel'],
+    status: readString(row, 'status') as DeviceRecord['status'],
+    metadata: readJsonRecord(row, 'metadata'),
+    createdAt: readTimestamp(row, 'created_at'),
+    updatedAt: readTimestamp(row, 'updated_at'),
+  };
+  setOptionalString(record, 'agentletVersion', row.agentlet_version);
+  setOptionalTimestamp(record, 'lastAuthAt', row.last_auth_at);
+  setOptionalTimestamp(record, 'lastHeartbeatAt', row.last_heartbeat_at);
+  setOptionalTimestamp(record, 'revokedAt', row.revoked_at);
+  return record;
+}
+
+function mapRunner(value: unknown, capabilitiesOverride?: readonly string[]): RunnerRecord {
+  const row = asRecord(value, 'runner');
+  return {
+    id: readString(row, 'id'),
+    deviceId: readString(row, 'device_id'),
+    runnerType: readString(row, 'runner_type'),
+    ...(typeof row.runner_version === 'string' ? { runnerVersion: row.runner_version } : {}),
+    ...(typeof row.model === 'string' ? { model: row.model } : {}),
+    status: readString(row, 'status') as RunnerRecord['status'],
+    maxConcurrency: readNumber(row, 'max_concurrency'),
+    capabilities: capabilitiesOverride ?? readStringArray(row, 'capabilities'),
+    createdAt: readTimestamp(row, 'created_at'),
+    updatedAt: readTimestamp(row, 'updated_at'),
+  };
+}
+
+function mapCapabilityGrant(value: unknown): CapabilityGrantRecord {
+  const row = asRecord(value, 'capability_grant');
+  const record: CapabilityGrantRecord = {
+    id: readString(row, 'id'),
+    domain: readDomain(row, 'domain'),
+    deviceId: readString(row, 'device_id'),
+    runnerId: readString(row, 'runner_id'),
+    capability: readString(row, 'capability'),
+    grantStatus: readString(row, 'grant_status') as CapabilityGrantRecord['grantStatus'],
+    grantedBy: readString(row, 'granted_by'),
+    grantedAt: readTimestamp(row, 'granted_at'),
+  };
+  setOptionalTimestamp(record, 'revokedAt', row.revoked_at);
+  return record;
+}
+
+function mapWorkdirGrant(value: unknown): WorkdirGrantRecord {
+  const row = asRecord(value, 'workdir_grant');
+  const record: WorkdirGrantRecord = {
+    id: readString(row, 'id'),
+    domain: readDomain(row, 'domain'),
+    deviceId: readString(row, 'device_id'),
+    pathPrefix: readString(row, 'path_prefix'),
+    accessMode: readString(row, 'access_mode') as WorkdirAccessMode,
+    createdAt: readTimestamp(row, 'created_at'),
+  };
+  setOptionalTimestamp(record, 'revokedAt', row.revoked_at);
+  return record;
+}
+
+function mapPolicyDecision(value: unknown): PolicyDecisionRecord {
+  const row = asRecord(value, 'policy_decision');
+  const record: PolicyDecisionRecord = {
+    id: readString(row, 'id'),
+    domain: readDomain(row, 'domain'),
+    input: readJsonRecord(row, 'input'),
+    decision: readString(row, 'decision') as PolicyDecisionRecord['decision'],
+    createdAt: readTimestamp(row, 'created_at'),
+  };
+  setOptionalString(record, 'taskId', row.task_id);
+  setOptionalString(record, 'runId', row.run_id);
+  setOptionalString(record, 'deviceId', row.device_id);
+  setOptionalString(record, 'runnerId', row.runner_id);
+  setOptionalString(record, 'reason', row.reason);
+  return record;
+}
+
 function asRecord(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AgentlinkError(500, 'AL_REPOSITORY_MAPPING', `${label} row is not an object`);
   return value as Record<string, unknown>;
@@ -398,6 +768,12 @@ function readNumber(row: Record<string, unknown>, key: string): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'bigint') return Number(value);
   throw new AgentlinkError(500, 'AL_REPOSITORY_MAPPING', `${key} must be a number`);
+}
+
+function readStringArray(row: Record<string, unknown>, key: string): string[] {
+  const value = row[key];
+  if (Array.isArray(value) && value.every((entry) => typeof entry === 'string')) return value;
+  throw new AgentlinkError(500, 'AL_REPOSITORY_MAPPING', `${key} must be a string array`);
 }
 
 function readTimestamp(row: Record<string, unknown>, key: string): string {
@@ -443,6 +819,38 @@ function setOptionalRecord<T extends object, K extends keyof T>(target: T, key: 
 
 function isUniqueViolation(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && (error as { code?: unknown }).code === '23505');
+}
+
+function hashSecret(secret: string): string {
+  return hashStable({ secret });
+}
+
+function getRequiredCapabilities(instruction: JsonRecord): string[] {
+  const value = instruction.requiredCapabilities ?? instruction.required_capabilities;
+  return Array.isArray(value) && value.every((item) => typeof item === 'string') ? value : ['codex:exec'];
+}
+
+function getWorkspace(instruction: JsonRecord, fallback: string): string {
+  return typeof instruction.workspace === 'string' && instruction.workspace.length > 0 ? instruction.workspace : fallback;
+}
+
+function getRequestedNetworkScope(instruction: JsonRecord, fallback: string): string {
+  return typeof instruction.networkScope === 'string' && instruction.networkScope.length > 0
+    ? instruction.networkScope
+    : typeof instruction.network_scope === 'string' && instruction.network_scope.length > 0
+      ? instruction.network_scope
+      : fallback;
+}
+
+function getWorkdirAccess(instruction: JsonRecord): WorkdirAccessMode {
+  const value = instruction.workdirAccess ?? instruction.workdir_access ?? instruction.access_mode;
+  return value === 'read' || value === 'write' || value === 'read_write' ? value : 'read_write';
+}
+
+function toExternalPolicyErrorCode(code: string | undefined): 'AL_POLICY_DENIED' | 'AL_CAPABILITY_DENIED' | 'AL_WORKDIR_DENIED' {
+  if (code === 'AL_WORKDIR_DENIED') return 'AL_WORKDIR_DENIED';
+  if (code === 'AL_CAPABILITY_DENIED' || code === 'AL_CAPABILITY_UNDECLARED' || code === 'AL_CAPABILITY_UNSUPPORTED') return 'AL_CAPABILITY_DENIED';
+  return 'AL_POLICY_DENIED';
 }
 
 function getTaskSpecString(taskSpec: JsonRecord, key: string): string | undefined {

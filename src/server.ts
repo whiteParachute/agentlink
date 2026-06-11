@@ -1,7 +1,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { loadConfig } from './config/index.js';
+import { loadConfig, type AgentlinkConfig } from './config/index.js';
 import { AgentlinkError, isAgentlinkError } from './control-plane/errors.js';
 import { InMemoryControlPlane, type CreateTaskInput, type RegisterDeviceInput } from './control-plane/in-memory.js';
+import { PostgresControlPlane } from './control-plane/postgres.js';
+import type { AgentlinkControlPlanePort } from './control-plane/port.js';
+import { PgRuntime } from './db/pg-client.js';
 import type { DeviceRecord, JsonRecord, RunRecord, RunnerRecord, TaskRecord } from './domain/entities.js';
 import type { RunStatus } from './domain/status.js';
 import { sendJson } from './http/json.js';
@@ -13,7 +16,7 @@ export interface ServerInfo {
 }
 
 export interface AgentlinkServerOptions {
-  controlPlane?: InMemoryControlPlane;
+  controlPlane?: AgentlinkControlPlanePort;
 }
 
 export function createAgentlinkServer(info: ServerInfo, options: AgentlinkServerOptions = {}) {
@@ -30,11 +33,30 @@ export function createAgentlinkServer(info: ServerInfo, options: AgentlinkServer
   });
 }
 
+export function createAgentlinkServerFromConfig(config: AgentlinkConfig) {
+  const runtime =
+    config.storage === 'postgres'
+      ? PgRuntime.fromOptions({
+          connectionString: requireDatabaseUrl(config),
+          max: config.databasePoolMax,
+          idleTimeoutMillis: config.databaseIdleTimeoutMs,
+          connectionTimeoutMillis: config.databaseConnectionTimeoutMs,
+          applicationName: config.serviceName,
+        })
+      : undefined;
+  const server = createAgentlinkServer(
+    { name: config.serviceName, version: '0.1.0', environment: config.environment },
+    { controlPlane: runtime ? new PostgresControlPlane(runtime) : new InMemoryControlPlane() },
+  );
+  if (runtime) server.on('close', () => void runtime.close());
+  return server;
+}
+
 async function handleRequest(
   req: IncomingMessage,
   res: ServerResponse,
   info: ServerInfo,
-  controlPlane: InMemoryControlPlane,
+  controlPlane: AgentlinkControlPlanePort,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
 
@@ -70,23 +92,23 @@ async function handleRequest(
       ...(maxRetries !== undefined ? { maxRetries } : {}),
     };
     const idempotencyKey = getIdempotencyKey(req, body);
-    const result = controlPlane.createTask(input, idempotencyKey);
+    const result = await controlPlane.createTask(input, idempotencyKey);
     sendJson(res, result.created ? 201 : 200, toTaskRunEnvelope(result.task, result.run));
     return;
   }
 
   const taskMatch = /^\/api\/v1\/tasks\/([^/]+)$/.exec(url.pathname);
   if (req.method === 'GET' && taskMatch) {
-    const task = controlPlane.getTask(taskMatch[1] ?? '');
+    const task = await controlPlane.getTask(taskMatch[1] ?? '');
     if (!task) throw new AgentlinkError(404, 'AL_TASK_NOT_FOUND', 'Task not found');
-    const run = controlPlane.getRun(task.currentRunId);
+    const run = await controlPlane.getRun(task.currentRunId);
     sendJson(res, 200, { task: toTaskDto(task), current_run: run ? toRunDto(run) : null });
     return;
   }
 
   const runMatch = /^\/api\/v1\/runs\/([^/]+)$/.exec(url.pathname);
   if (req.method === 'GET' && runMatch) {
-    const run = controlPlane.getRun(runMatch[1] ?? '');
+    const run = await controlPlane.getRun(runMatch[1] ?? '');
     if (!run) throw new AgentlinkError(404, 'AL_RUN_NOT_FOUND', 'Run not found');
     sendJson(res, 200, { run: toRunDto(run) });
     return;
@@ -95,9 +117,9 @@ async function handleRequest(
   const runEventsMatch = /^\/api\/v1\/runs\/([^/]+)\/events$/.exec(url.pathname);
   if (req.method === 'GET' && runEventsMatch) {
     const runId = runEventsMatch[1] ?? '';
-    if (!controlPlane.getRun(runId)) throw new AgentlinkError(404, 'AL_RUN_NOT_FOUND', 'Run not found');
+    if (!(await controlPlane.getRun(runId))) throw new AgentlinkError(404, 'AL_RUN_NOT_FOUND', 'Run not found');
     const afterSeq = Number.parseInt(url.searchParams.get('after_seq') ?? '0', 10);
-    sendJson(res, 200, { events: controlPlane.getRunEvents(runId, Number.isFinite(afterSeq) ? afterSeq : 0).map(toRunEventDto) });
+    sendJson(res, 200, { events: (await controlPlane.getRunEvents(runId, Number.isFinite(afterSeq) ? afterSeq : 0)).map(toRunEventDto) });
     return;
   }
 
@@ -117,7 +139,7 @@ async function handleRequest(
       ...(capabilityGrants ? { capabilityGrants } : {}),
       ...(workdirGrants ? { workdirGrants } : {}),
     };
-    const result = controlPlane.registerDevice(input);
+    const result = await controlPlane.registerDevice(input);
     sendJson(res, 201, {
       device_id: result.device.id,
       runner_id: result.runner.id,
@@ -131,7 +153,7 @@ async function handleRequest(
   const heartbeatMatch = /^\/api\/v1\/devices\/([^/]+)\/heartbeat$/.exec(url.pathname);
   if (req.method === 'POST' && heartbeatMatch) {
     const deviceId = heartbeatMatch[1] ?? '';
-    const device = controlPlane.heartbeat(deviceId, requireBearer(req));
+    const device = await controlPlane.heartbeat(deviceId, requireBearer(req));
     sendJson(res, 200, { device: toDeviceDto(device) });
     return;
   }
@@ -139,9 +161,9 @@ async function handleRequest(
   if (req.method === 'POST' && url.pathname === '/api/v1/agentlet/pull') {
     const body = await readJsonRecord(req);
     const deviceId = requireString(body, 'device_id');
-    controlPlane.authenticateDevice(deviceId, requireBearer(req));
+    await controlPlane.authenticateDevice(deviceId, requireBearer(req));
     const supportedCapabilities = optionalStringArray(body, 'supported_capabilities');
-    const instruction = controlPlane.pull({
+    const instruction = await controlPlane.pull({
       deviceId,
       runnerId: requireString(body, 'runner_id'),
       ...(supportedCapabilities ? { supportedCapabilities } : {}),
@@ -164,9 +186,9 @@ async function handleRequest(
   if (req.method === 'POST' && url.pathname === '/api/v1/agentlet/ack') {
     const body = await readJsonRecord(req);
     const deviceId = requireString(body, 'device_id');
-    controlPlane.authenticateDevice(deviceId, requireBearer(req));
-    ensureLeaseBelongsToDevice(controlPlane, requireString(body, 'lease_id'), deviceId);
-    const result = controlPlane.ackLease(requireString(body, 'lease_id'), requireBoolean(body, 'accepted'), optionalString(body, 'reason'));
+    await controlPlane.authenticateDevice(deviceId, requireBearer(req));
+    await ensureLeaseBelongsToDevice(controlPlane, requireString(body, 'lease_id'), deviceId);
+    const result = await controlPlane.ackLease(requireString(body, 'lease_id'), requireBoolean(body, 'accepted'), optionalString(body, 'reason'));
     sendJson(res, 200, { lease: toLeaseDto(result.lease), run: toRunDto(result.run), task: toTaskDto(result.task) });
     return;
   }
@@ -174,9 +196,9 @@ async function handleRequest(
   if (req.method === 'POST' && url.pathname === '/api/v1/agentlet/progress') {
     const body = await readJsonRecord(req);
     const deviceId = requireString(body, 'device_id');
-    controlPlane.authenticateDevice(deviceId, requireBearer(req));
-    ensureLeaseBelongsToDevice(controlPlane, requireString(body, 'lease_id'), deviceId);
-    const event = controlPlane.appendProgress({
+    await controlPlane.authenticateDevice(deviceId, requireBearer(req));
+    await ensureLeaseBelongsToDevice(controlPlane, requireString(body, 'lease_id'), deviceId);
+    const event = await controlPlane.appendProgress({
       runId: requireString(body, 'run_id'),
       leaseId: requireString(body, 'lease_id'),
       seq: requireInteger(body, 'seq'),
@@ -190,8 +212,8 @@ async function handleRequest(
   if (req.method === 'POST' && url.pathname === '/api/v1/agentlet/complete') {
     const body = await readJsonRecord(req);
     const deviceId = requireString(body, 'device_id');
-    controlPlane.authenticateDevice(deviceId, requireBearer(req));
-    ensureLeaseBelongsToDevice(controlPlane, requireString(body, 'lease_id'), deviceId);
+    await controlPlane.authenticateDevice(deviceId, requireBearer(req));
+    await ensureLeaseBelongsToDevice(controlPlane, requireString(body, 'lease_id'), deviceId);
     const status = requireString(body, 'status') as RunStatus;
     if (!['SUCCEEDED', 'FAILED', 'CANCELLED'].includes(status)) {
       throw new AgentlinkError(400, 'AL_STATUS_INVALID', 'Complete status must be SUCCEEDED, FAILED, or CANCELLED');
@@ -199,7 +221,7 @@ async function handleRequest(
     const terminalResult = optionalRecord(body, 'result');
     const terminalError = optionalRecord(body, 'error');
     const metrics = optionalRecord(body, 'metrics');
-    const result = controlPlane.completeRun({
+    const result = await controlPlane.completeRun({
       runId: requireString(body, 'run_id'),
       leaseId: requireString(body, 'lease_id'),
       status: status as 'SUCCEEDED' | 'FAILED' | 'CANCELLED',
@@ -325,10 +347,17 @@ function toRunnerDto(runner: RunnerRecord) {
   };
 }
 
-function ensureLeaseBelongsToDevice(controlPlane: InMemoryControlPlane, leaseId: string, deviceId: string): void {
-  const lease = controlPlane.getLease(leaseId);
+async function ensureLeaseBelongsToDevice(controlPlane: AgentlinkControlPlanePort, leaseId: string, deviceId: string): Promise<void> {
+  const lease = await controlPlane.getLease(leaseId);
   if (!lease) throw new AgentlinkError(404, 'AL_LEASE_NOT_FOUND', 'Lease not found');
   if (lease.deviceId !== deviceId) throw new AgentlinkError(403, 'AL_RUN_001', 'Lease does not belong to this device');
+}
+
+function requireDatabaseUrl(config: AgentlinkConfig): string {
+  if (!config.databaseUrl) {
+    throw new Error('AGENTLINK_DATABASE_URL is required when AGENTLINK_STORAGE=postgres');
+  }
+  return config.databaseUrl;
 }
 
 async function readJsonRecord(req: IncomingMessage): Promise<JsonRecord> {
@@ -435,8 +464,8 @@ function isRecord(value: unknown): value is JsonRecord {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const config = loadConfig();
-  const server = createAgentlinkServer({ name: config.serviceName, version: '0.1.0', environment: config.environment });
+  const server = createAgentlinkServerFromConfig(config);
   server.listen(config.port, config.host, () => {
-    console.log(`${config.serviceName} listening on ${config.host}:${config.port}`);
+    console.log(`${config.serviceName} listening on ${config.host}:${config.port} (storage=${config.storage})`);
   });
 }

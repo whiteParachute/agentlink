@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import { DEFAULT_WORKSPACE } from '../src/control-plane/in-memory.js';
-import { createAgentlinkServer } from '../src/server.js';
+import { createAgentlinkServer, createAgentlinkServerFromConfig } from '../src/server.js';
 
 
 async function withServer(run: (baseUrl: string) => Promise<void>): Promise<void> {
@@ -47,6 +47,44 @@ test('health, ready, and meta endpoints return service metadata', async () => {
     assert.equal(body.m1Scope, 'personal:telegram-agentlink-claw-tenc-codex');
     assert.equal(body.capabilities.includes('agentlet-pull'), true);
   });
+});
+
+test('configured server keeps memory mode default and requires DSN for PostgreSQL mode', async () => {
+  const server = createAgentlinkServerFromConfig({
+    host: '127.0.0.1',
+    port: 0,
+    serviceName: 'agentlink-test',
+    environment: 'test',
+    storage: 'memory',
+    databasePoolMax: 1,
+    databaseIdleTimeoutMs: 1_000,
+    databaseConnectionTimeoutMs: 1_000,
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.equal(typeof address, 'object');
+  assert.notEqual(address, null);
+  try {
+    const health = await fetch(`http://127.0.0.1:${(address as { port: number }).port}/healthz`);
+    assert.equal(health.status, 200);
+  } finally {
+    await closeServer(server);
+  }
+
+  assert.throws(
+    () =>
+      createAgentlinkServerFromConfig({
+        host: '127.0.0.1',
+        port: 0,
+        serviceName: 'agentlink-test',
+        environment: 'test',
+        storage: 'postgres',
+        databasePoolMax: 1,
+        databaseIdleTimeoutMs: 1_000,
+        databaseConnectionTimeoutMs: 1_000,
+      }),
+    /AGENTLINK_DATABASE_URL is required/,
+  );
 });
 
 test('HTTP M1 control-plane loop creates a task, leases it to an agentlet, and completes it', async () => {

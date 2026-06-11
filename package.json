@@ -10,8 +10,8 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "npm run typecheck && npm test",
-    "dev": "node --watch --enable-source-maps dist/server.js",
-    "start": "node --enable-source-maps dist/server.js",
+    "dev": "node --watch --enable-source-maps dist/src/server.js",
+    "start": "node --enable-source-maps dist/src/server.js",
     "test": "npm run build && node --test dist/**/*.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "db:smoke": "node scripts/db-smoke.mjs"

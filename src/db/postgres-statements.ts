@@ -79,6 +79,227 @@ FROM updated_task t
 JOIN inserted_run r ON r.task_id = t.id;
 `,
 
+  findTaskById: `
+SELECT row_to_json(t) AS task, row_to_json(r) AS run
+FROM al_task t
+LEFT JOIN al_run r ON r.id = t.current_run_id
+WHERE t.id = $1;
+`,
+
+  findRunById: `
+SELECT row_to_json(r) AS run
+FROM al_run r
+WHERE r.id = $1;
+`,
+
+  findLeaseById: `
+SELECT row_to_json(l) AS lease
+FROM al_run_lease l
+WHERE l.id = $1;
+`,
+
+  listRunEvents: `
+SELECT *
+FROM al_run_event
+WHERE run_id = $1
+  AND seq > $2
+ORDER BY seq ASC;
+`,
+
+  insertDevice: `
+INSERT INTO al_device (
+  id,
+  domain,
+  display_name,
+  token_hash,
+  network_scope,
+  owner_user_id,
+  trust_level,
+  status,
+  agentlet_version,
+  metadata,
+  created_at,
+  updated_at
+) VALUES (
+  $1,
+  $2,
+  $3,
+  $4,
+  $5,
+  $6,
+  $7,
+  'REGISTERED',
+  $8,
+  $9::jsonb,
+  $10,
+  $10
+)
+RETURNING *;
+`,
+
+  insertRunner: `
+INSERT INTO al_runner (
+  id,
+  device_id,
+  runner_type,
+  runner_version,
+  model,
+  status,
+  max_concurrency,
+  created_at,
+  updated_at
+) VALUES (
+  $1,
+  $2,
+  $3,
+  $4,
+  $5,
+  'online',
+  $6,
+  $7,
+  $7
+)
+RETURNING *;
+`,
+
+  insertCapabilityDeclared: `
+INSERT INTO al_capability_declared (device_id, runner_id, name, scope, metadata, reported_at)
+VALUES ($1, $2, $3, $4, '{}'::jsonb, $5)
+ON CONFLICT (device_id, runner_id, name, scope)
+DO UPDATE SET reported_at = EXCLUDED.reported_at
+RETURNING *;
+`,
+
+  insertCapabilityGrant: `
+INSERT INTO al_capability_grant (
+  id,
+  domain,
+  device_id,
+  runner_id,
+  capability,
+  grant_status,
+  granted_by,
+  granted_at
+) VALUES (
+  $1,
+  $2,
+  $3,
+  $4,
+  $5,
+  'GRANTED',
+  $6,
+  $7
+)
+RETURNING *;
+`,
+
+  insertWorkdirGrant: `
+INSERT INTO al_workdir_grant (
+  id,
+  domain,
+  device_id,
+  path_prefix,
+  access_mode,
+  created_at
+) VALUES (
+  $1,
+  $2,
+  $3,
+  $4,
+  $5,
+  $6
+)
+RETURNING *;
+`,
+
+  findDeviceById: `
+SELECT row_to_json(d) AS device
+FROM al_device d
+WHERE d.id = $1;
+`,
+
+  heartbeatDevice: `
+UPDATE al_device
+SET status = 'ONLINE',
+    last_auth_at = $2,
+    last_heartbeat_at = $2,
+    updated_at = $2
+WHERE id = $1
+  AND status <> 'REVOKED'
+RETURNING *;
+`,
+
+  findRunnerById: `
+SELECT row_to_json(runner_with_caps) AS runner
+FROM (
+  SELECT
+    r.*,
+    COALESCE(json_agg(cd.name ORDER BY cd.name) FILTER (WHERE cd.name IS NOT NULL), '[]'::json) AS capabilities
+  FROM al_runner r
+  LEFT JOIN al_capability_declared cd ON cd.device_id = r.device_id AND cd.runner_id = r.id
+  WHERE r.id = $1
+  GROUP BY r.id
+) runner_with_caps;
+`,
+
+  findDispatchCandidates: `
+SELECT row_to_json(r) AS run, row_to_json(t) AS task
+FROM al_run r
+JOIN al_task t ON t.id = r.task_id
+WHERE r.domain = $1
+  AND r.status = 'QUEUED'
+ORDER BY r.created_at ASC, r.id ASC
+LIMIT $2;
+`,
+
+  leaseSpecificQueuedRun: `
+WITH candidate_run AS (
+  SELECT r.id, r.task_id, r.domain
+  FROM al_run r
+  JOIN al_device d ON d.id = $2 AND d.domain = r.domain
+  JOIN al_runner runner ON runner.id = $3 AND runner.device_id = d.id
+  WHERE r.id = $1
+    AND r.domain = $4
+    AND r.status = 'QUEUED'
+    AND d.status = 'ONLINE'
+    AND runner.status = 'online'
+    AND NOT EXISTS (
+      SELECT 1
+      FROM al_run_lease active_lease
+      WHERE active_lease.run_id = r.id
+        AND active_lease.status IN ${ACTIVE_LEASE_STATUSES_SQL}
+    )
+  LIMIT 1
+  FOR UPDATE OF r SKIP LOCKED
+), inserted_lease AS (
+  INSERT INTO al_run_lease (id, run_id, domain, device_id, runner_id, status, issued_at, expires_at, created_at, updated_at)
+  SELECT $5, c.id, c.domain, $2, $3, 'ISSUED', $6, $7, $6, $6
+  FROM candidate_run c
+  RETURNING *
+), updated_run AS (
+  UPDATE al_run r
+  SET status = 'LEASED', current_lease_id = l.id, policy_decision_id = $8, updated_at = $6, version = r.version + 1
+  FROM inserted_lease l
+  WHERE r.id = l.run_id
+    AND r.status = 'QUEUED'
+    AND r.current_lease_id IS NULL
+  RETURNING r.*
+), updated_task AS (
+  UPDATE al_task t
+  SET status = 'RUNNING', updated_at = $6
+  FROM updated_run r
+  WHERE t.id = r.task_id
+  RETURNING t.*
+)
+SELECT
+  row_to_json(l) AS lease,
+  row_to_json(r) AS run,
+  row_to_json(t) AS task
+FROM inserted_lease l
+JOIN updated_run r ON r.id = l.run_id
+JOIN updated_task t ON t.id = r.task_id;
+`,
+
   leaseNextQueuedRun: `
 WITH candidate_run AS (
   SELECT r.id, r.task_id, r.domain

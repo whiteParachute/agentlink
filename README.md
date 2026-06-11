@@ -34,10 +34,10 @@ Agentlink is in early development. The repository currently contains:
 - a Node.js 22 + TypeScript control-plane skeleton;
 - a minimal HTTP API for tasks, devices, leases, progress, and completion;
 - an in-memory implementation for executable protocol tests;
-- PostgreSQL schema, SQL contracts, repository adapter, and `pg` runtime adapter scaffolding;
+- PostgreSQL schema, SQL contracts, repository adapter, `pg` runtime adapter, and opt-in PostgreSQL server mode wiring;
 - GitHub Actions CI and Node built-in tests.
 
-Not yet included: full live PostgreSQL server wiring, Telegram adapter, device agentlet daemon, Codex runner adapter, or production deployment guide.
+Not yet included: live PostgreSQL DSN/concurrency verification, Telegram adapter, device agentlet daemon, Codex runner adapter, or production deployment guide.
 
 ## Quick start
 
@@ -60,6 +60,14 @@ AGENTLINK_DATABASE_URL=postgres://... npm run db:smoke
 ```
 
 Without `AGENTLINK_DATABASE_URL`, the smoke test exits successfully with a skip message.
+
+Optional PostgreSQL-backed server mode:
+
+```bash
+AGENTLINK_STORAGE=postgres AGENTLINK_DATABASE_URL=postgres://... npm start
+```
+
+The default remains `AGENTLINK_STORAGE=memory` for local protocol smoke tests.
 
 ## Development
 
