@@ -33,6 +33,7 @@ Telegram -> Agentlink Control Plane -> claw-tenc agentlet -> Codex CLI -> Telegr
 - Domain state machine helpers under `src/domain/`.
 - Node built-in test runner.
 - GitHub Actions CI.
+- M1 task status tracking in `docs/m1-task-status.md`.
 
 ## Commands
 

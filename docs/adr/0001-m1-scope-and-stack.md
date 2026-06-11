@@ -6,7 +6,7 @@ Accepted for implementation spike.
 
 ## Context
 
-Draft 3 of the Agentlink M0 technical design passed review. M1 must prove the narrow loop:
+Draft 3 of the Agentlink M1 technical design passed review. M1 must prove the narrow loop:
 
 ```text
 Telegram -> Agentlink -> claw-tenc agentlet -> Codex CLI -> Telegram

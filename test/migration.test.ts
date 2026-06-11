@@ -2,6 +2,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadInitialMigration } from '../src/db/schema.js';
 
+
+test('initial migration includes AL-TD-001 domain and network scope baseline', () => {
+  const sql = loadInitialMigration();
+  assert.match(sql, /CREATE TYPE al_domain AS ENUM \('personal', 'work'\)/i);
+  assert.match(sql, /domain al_domain NOT NULL DEFAULT 'personal'/i);
+  assert.match(sql, /network_scope text NOT NULL DEFAULT 'personal'/i);
+});
+
 test('initial migration contains active lease partial unique index', () => {
   const sql = loadInitialMigration();
   assert.match(sql, /CREATE UNIQUE INDEX uq_al_run_lease_active/i);
