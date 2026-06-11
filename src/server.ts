@@ -75,7 +75,7 @@ async function handleRequest(
       service: info.name,
       version: info.version,
       m1Scope: 'personal:telegram-agentlink-claw-tenc-codex',
-      capabilities: ['task-api', 'device-register', 'agentlet-pull', 'agentlet-progress', 'agentlet-complete'],
+      capabilities: ['task-api', 'device-register', 'agentlet-pull', 'agentlet-control', 'agentlet-recover', 'agentlet-progress', 'agentlet-complete'],
     });
     return;
   }
@@ -103,6 +103,19 @@ async function handleRequest(
     if (!task) throw new AgentlinkError(404, 'AL_TASK_NOT_FOUND', 'Task not found');
     const run = await controlPlane.getRun(task.currentRunId);
     sendJson(res, 200, { task: toTaskDto(task), current_run: run ? toRunDto(run) : null });
+    return;
+  }
+
+  const taskCancelMatch = /^\/api\/v1\/tasks\/([^/]+)\/cancel$/.exec(url.pathname);
+  if (req.method === 'POST' && taskCancelMatch) {
+    const body = await readJsonRecord(req);
+    const result = await controlPlane.cancelTask(taskCancelMatch[1] ?? '', optionalString(body, 'reason'));
+    sendJson(res, 200, {
+      task: toTaskDto(result.task),
+      run: result.run ? toRunDto(result.run) : null,
+      lease: result.lease ? toLeaseDto(result.lease) : null,
+      control_actions: result.controlActions.map(toControlActionDto),
+    });
     return;
   }
 
@@ -180,6 +193,24 @@ async function handleRequest(
       expires_at: instruction.expiresAt,
       instruction: instruction.instruction,
     });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v1/agentlet/control/poll') {
+    const body = await readJsonRecord(req);
+    const deviceId = requireString(body, 'device_id');
+    await controlPlane.authenticateDevice(deviceId, requireBearer(req));
+    const result = await controlPlane.pollControl(deviceId);
+    sendJson(res, 200, { control_actions: result.controlActions.map(toControlActionDto) });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v1/agentlet/recover') {
+    const body = await readJsonRecord(req);
+    const deviceId = requireString(body, 'device_id');
+    await controlPlane.authenticateDevice(deviceId, requireBearer(req));
+    const result = await controlPlane.recoverDevice(deviceId);
+    sendJson(res, 200, { recoverable_runs: result.recoverableRuns.map(toRecoverableRunDto) });
     return;
   }
 
@@ -315,6 +346,27 @@ function toRunEventDto(event: { runId: string; seq: number; domain: string; even
     event_type: event.eventType,
     payload: event.payload,
     emitted_at: event.emittedAt,
+  };
+}
+
+function toControlActionDto(action: { type: 'cancel_run'; runId: string; leaseId: string; reason: string }) {
+  return {
+    type: action.type,
+    run_id: action.runId,
+    lease_id: action.leaseId,
+    reason: action.reason,
+  };
+}
+
+function toRecoverableRunDto(recoverable: { runId: string; taskId: string; leaseId: string; runStatus: string; leaseStatus: string; instruction: JsonRecord; expiresAt: string }) {
+  return {
+    run_id: recoverable.runId,
+    task_id: recoverable.taskId,
+    lease_id: recoverable.leaseId,
+    run_status: recoverable.runStatus,
+    lease_status: recoverable.leaseStatus,
+    instruction: recoverable.instruction,
+    expires_at: recoverable.expiresAt,
   };
 }
 

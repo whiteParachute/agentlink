@@ -249,3 +249,24 @@ test('ack reject returns the run to QUEUED and permits a later lease', () => {
   assert.ok(second);
   assert.notEqual(second.leaseId, first.leaseId);
 });
+
+test('task cancel emits a cancel_run control action and removes it from recovery', () => {
+  const { controlPlane, registered, created } = bootstrap();
+  const instruction = controlPlane.pull({ deviceId: registered.device.id, runnerId: registered.runner.id });
+  assert.ok(instruction);
+  controlPlane.ackLease(instruction.leaseId, true);
+
+  const beforeCancelRecovery = controlPlane.recoverDevice(registered.device.id);
+  assert.equal(beforeCancelRecovery.recoverableRuns.length, 1);
+  assert.equal(beforeCancelRecovery.recoverableRuns[0]?.runId, instruction.runId);
+
+  const cancelled = controlPlane.cancelTask(created.task.id, 'user_cancelled');
+  assert.equal(cancelled.task.status, 'CANCELLED');
+  assert.equal(cancelled.run?.status, 'CANCELLED');
+  assert.equal(cancelled.lease?.status, 'CANCELLED');
+  assert.deepEqual(cancelled.controlActions, [{ type: 'cancel_run', runId: instruction.runId, leaseId: instruction.leaseId, reason: 'user_cancelled' }]);
+
+  const polled = controlPlane.pollControl(registered.device.id);
+  assert.deepEqual(polled.controlActions, cancelled.controlActions);
+  assert.deepEqual(controlPlane.recoverDevice(registered.device.id).recoverableRuns, []);
+});

@@ -143,3 +143,15 @@ test('cancelTask can cancel current non-terminal task/run/lease without agentlet
   assert.match(PostgreSqlStatements.cancelTask, /SET status = 'CANCELLED'/i);
   assert.match(PostgreSqlStatements.cancelTask, /LEFT JOIN updated_lease/i);
 });
+
+test('control poll and recover statements keep cancel and active recovery scopes explicit', () => {
+  assert.match(PostgreSqlStatements.listControlActionsForDevice, /l\.device_id = \$1/i);
+  assert.match(PostgreSqlStatements.listControlActionsForDevice, /l\.status = 'CANCELLED'/i);
+  assert.match(PostgreSqlStatements.listControlActionsForDevice, /r\.status = 'CANCELLED'/i);
+  assert.match(PostgreSqlStatements.listControlActionsForDevice, /LIMIT \$2/i);
+
+  assert.match(PostgreSqlStatements.listRecoverableRunsForDevice, /l\.device_id = \$1/i);
+  assert.match(PostgreSqlStatements.listRecoverableRunsForDevice, /l\.status IN \('ISSUED', 'ACKED', 'RENEWED'\)/i);
+  assert.match(PostgreSqlStatements.listRecoverableRunsForDevice, /r\.current_lease_id = l\.id/i);
+  assert.match(PostgreSqlStatements.listRecoverableRunsForDevice, /r\.status IN \('LEASED', 'RUNNING'\)/i);
+});

@@ -437,3 +437,23 @@ test('PostgreSqlRepository replays terminal complete before returning AL_LEASE_E
   assert.equal(result.run.status, 'SUCCEEDED');
   assert.deepEqual(client.calls.map((call) => call.sql), ['BEGIN', PostgreSqlStatements.completeRun, PostgreSqlStatements.replayTerminalComplete, 'COMMIT']);
 });
+
+test('PostgreSqlRepository lists cancel control actions and recoverable active runs for a device', async () => {
+  const controlClient = new ScriptedSqlClient();
+  controlClient.enqueue(one({ lease: leaseRow({ status: 'CANCELLED', cancelled_at: NOW, expire_reason: 'user_cancelled' }), run: runRow({ status: 'CANCELLED' }) }));
+  const controlRepo = new PostgreSqlRepository(controlClient, { now: () => new Date(NOW) });
+  const actions = await controlRepo.listControlActionsForDevice('00000000-0000-4000-8000-000000000301');
+  assert.deepEqual(actions, [{ type: 'cancel_run', runId: '00000000-0000-4000-8000-000000000101', leaseId: '00000000-0000-4000-8000-000000000201', reason: 'user_cancelled' }]);
+  assert.deepEqual(controlClient.calls.map((call) => call.sql), [PostgreSqlStatements.listControlActionsForDevice]);
+
+  const recoverClient = new ScriptedSqlClient();
+  recoverClient.enqueue(one({ lease: leaseRow({ status: 'ACKED' }), run: runRow({ status: 'RUNNING' }), task: taskRow({ status: 'RUNNING' }) }));
+  const recoverRepo = new PostgreSqlRepository(recoverClient, { now: () => new Date(NOW) });
+  const recoverable = await recoverRepo.listRecoverableRunsForDevice('00000000-0000-4000-8000-000000000301');
+  assert.equal(recoverable.length, 1);
+  assert.equal(recoverable[0]?.runId, '00000000-0000-4000-8000-000000000101');
+  assert.equal(recoverable[0]?.taskId, '00000000-0000-4000-8000-000000000001');
+  assert.equal(recoverable[0]?.leaseStatus, 'ACKED');
+  assert.equal(recoverable[0]?.runStatus, 'RUNNING');
+  assert.deepEqual(recoverClient.calls.map((call) => call.sql), [PostgreSqlStatements.listRecoverableRunsForDevice]);
+});

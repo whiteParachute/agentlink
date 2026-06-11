@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import type {
   CapabilityGrantRecord,
+  ControlActionRecord,
   DeviceRecord,
   Domain,
   JsonRecord,
   LeaseRecord,
   PolicyDecisionRecord,
+  RecoverableRunRecord,
   RunEventRecord,
   RunRecord,
   RunnerRecord,
@@ -328,6 +330,66 @@ export class InMemoryControlPlane {
     const task = this.mustGetTask(run.taskId);
     this.updateTask(task.id, { status: 'RUNNING', updatedAt: now });
     return { runId: run.id, taskId: run.taskId, leaseId: lease.id, expiresAt, instruction: run.instruction };
+  }
+
+  cancelTask(taskId: string, reason = 'user_cancelled'): { task: TaskRecord; run?: RunRecord; lease?: LeaseRecord; controlActions: ControlActionRecord[] } {
+    const task = this.mustGetTask(taskId);
+    if (task.status === 'SUCCEEDED' || task.status === 'FAILED' || task.status === 'CANCELLED') {
+      throw new AgentlinkError(409, 'AL_STATE_CONFLICT', 'Task is already terminal');
+    }
+
+    const now = this.timestamp();
+    const run = this.runs.get(task.currentRunId);
+    let cancelledRun: RunRecord | undefined;
+    let cancelledLease: LeaseRecord | undefined;
+    const controlActions: ControlActionRecord[] = [];
+
+    if (run && !isTerminalRunStatus(run.status)) {
+      if (run.currentLeaseId) {
+        const lease = this.leases.get(run.currentLeaseId);
+        if (lease && isActiveLeaseStatus(lease.status)) {
+          lease.status = 'CANCELLED';
+          lease.cancelledAt = now;
+          lease.expireReason = reason;
+          lease.updatedAt = now;
+          lease.version += 1;
+          cancelledLease = lease;
+          controlActions.push({ type: 'cancel_run', runId: run.id, leaseId: lease.id, reason });
+        }
+      }
+      cancelledRun = this.updateRun(run.id, { status: 'CANCELLED', finishedAt: now, updatedAt: now });
+    }
+
+    const cancelledTask = this.updateTask(task.id, { status: 'CANCELLED', updatedAt: now });
+    return { task: cancelledTask, ...(cancelledRun ? { run: cancelledRun } : {}), ...(cancelledLease ? { lease: cancelledLease } : {}), controlActions };
+  }
+
+  pollControl(deviceId: string): { controlActions: ControlActionRecord[] } {
+    this.mustGetDevice(deviceId);
+    const controlActions = [...this.leases.values()]
+      .filter((lease) => lease.deviceId === deviceId && lease.status === 'CANCELLED' && Boolean(lease.cancelledAt))
+      .map((lease) => ({ type: 'cancel_run' as const, runId: lease.runId, leaseId: lease.id, reason: lease.expireReason ?? 'user_cancelled' }));
+    return { controlActions };
+  }
+
+  recoverDevice(deviceId: string): { recoverableRuns: RecoverableRunRecord[] } {
+    this.mustGetDevice(deviceId);
+    const recoverableRuns = [...this.leases.values()]
+      .filter((lease) => lease.deviceId === deviceId && isActiveLeaseStatus(lease.status))
+      .flatMap((lease) => {
+        const run = this.runs.get(lease.runId);
+        if (!run || run.currentLeaseId !== lease.id || (run.status !== 'LEASED' && run.status !== 'RUNNING')) return [];
+        return [{
+          runId: run.id,
+          taskId: run.taskId,
+          leaseId: lease.id,
+          runStatus: run.status,
+          leaseStatus: lease.status,
+          instruction: run.instruction,
+          expiresAt: lease.expiresAt,
+        }];
+      });
+    return { recoverableRuns };
   }
 
   ackLease(leaseId: string, accepted: boolean, reason?: string): { lease: LeaseRecord; run: RunRecord; task: TaskRecord } {

@@ -289,3 +289,62 @@ test('malformed JSON returns AL_BAD_JSON instead of internal error', async () =>
     assert.equal(((await response.json()) as { error: { code: string } }).error.code, 'AL_BAD_JSON');
   });
 });
+
+test('HTTP cancel publishes control_actions and recover returns active leases only', async () => {
+  await withServer(async (baseUrl) => {
+    const register = await postJson(baseUrl, '/api/v1/devices/register', {
+      display_name: 'claw-tenc',
+      owner_user_id: 'whiteParachute',
+      capability_grants: ['codex:exec'],
+      workdir_grants: [{ path_prefix: DEFAULT_WORKSPACE, access_mode: 'read_write' }],
+    });
+    assert.equal(register.status, 201);
+    const registered = (await register.json()) as { device_id: string; runner_id: string; device_secret: string };
+    const auth = { authorization: `Bearer ${registered.device_secret}` };
+    await postJson(baseUrl, `/api/v1/devices/${registered.device_id}/heartbeat`, {}, auth);
+
+    const taskResponse = await postJson(
+      baseUrl,
+      '/api/v1/tasks',
+      { source: 'telegram', source_ref: 'telegram:chat:cancel', payload: { text: 'cancel me' } },
+      { 'idempotency-key': 'telegram:chat:cancel' },
+    );
+    assert.equal(taskResponse.status, 201);
+    const task = (await taskResponse.json()) as { task_id: string };
+
+    const pull = await postJson(baseUrl, '/api/v1/agentlet/pull', { device_id: registered.device_id, runner_id: registered.runner_id }, auth);
+    assert.equal(pull.status, 200);
+    const pulled = (await pull.json()) as { run_id: string; lease_id: string };
+    const ack = await postJson(baseUrl, '/api/v1/agentlet/ack', { device_id: registered.device_id, lease_id: pulled.lease_id, accepted: true }, auth);
+    assert.equal(ack.status, 200);
+
+    const recoverBeforeCancel = await postJson(baseUrl, '/api/v1/agentlet/recover', { device_id: registered.device_id }, auth);
+    assert.equal(recoverBeforeCancel.status, 200);
+    const recoverBeforeBody = (await recoverBeforeCancel.json()) as { recoverable_runs: Array<{ run_id: string; task_id: string; lease_id: string; run_status: string; lease_status: string; instruction: { prompt?: string }; expires_at: string }> };
+    assert.equal(recoverBeforeBody.recoverable_runs.length, 1);
+    assert.equal(recoverBeforeBody.recoverable_runs[0]?.run_id, pulled.run_id);
+    assert.equal(recoverBeforeBody.recoverable_runs[0]?.task_id, task.task_id);
+    assert.equal(recoverBeforeBody.recoverable_runs[0]?.lease_id, pulled.lease_id);
+    assert.equal(recoverBeforeBody.recoverable_runs[0]?.run_status, 'RUNNING');
+    assert.equal(recoverBeforeBody.recoverable_runs[0]?.lease_status, 'ACKED');
+    assert.equal(recoverBeforeBody.recoverable_runs[0]?.instruction.prompt, 'cancel me');
+    assert.equal(typeof recoverBeforeBody.recoverable_runs[0]?.expires_at, 'string');
+
+    const cancel = await postJson(baseUrl, `/api/v1/tasks/${task.task_id}/cancel`, { reason: 'user_cancelled' });
+    assert.equal(cancel.status, 200);
+    const cancelled = (await cancel.json()) as { task: { status: string }; run: { status: string }; lease: { status: string }; control_actions: Array<{ type: string; run_id: string; lease_id: string; reason: string; runId?: string }> };
+    assert.equal(cancelled.task.status, 'CANCELLED');
+    assert.equal(cancelled.run.status, 'CANCELLED');
+    assert.equal(cancelled.lease.status, 'CANCELLED');
+    assert.deepEqual(cancelled.control_actions, [{ type: 'cancel_run', run_id: pulled.run_id, lease_id: pulled.lease_id, reason: 'user_cancelled' }]);
+    assert.equal(cancelled.control_actions.some((action) => action.runId !== undefined), false);
+
+    const poll = await postJson(baseUrl, '/api/v1/agentlet/control/poll', { device_id: registered.device_id }, auth);
+    assert.equal(poll.status, 200);
+    assert.deepEqual((await poll.json()) as { control_actions: unknown[] }, { control_actions: cancelled.control_actions });
+
+    const recoverAfterCancel = await postJson(baseUrl, '/api/v1/agentlet/recover', { device_id: registered.device_id }, auth);
+    assert.equal(recoverAfterCancel.status, 200);
+    assert.deepEqual(await recoverAfterCancel.json(), { recoverable_runs: [] });
+  });
+});

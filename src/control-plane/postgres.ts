@@ -57,6 +57,24 @@ export class PostgresControlPlane implements AgentlinkControlPlanePort {
     };
   }
 
+  async cancelTask(taskId: string, reason?: string) {
+    return await this.withRepository(async (repository) => {
+      const cancelled = await repository.cancelTask(taskId, reason);
+      const controlActions = cancelled.lease
+        ? [{ type: 'cancel_run' as const, runId: cancelled.lease.runId, leaseId: cancelled.lease.id, reason: cancelled.lease.expireReason ?? reason ?? 'user_cancelled' }]
+        : [];
+      return { ...cancelled, controlActions };
+    });
+  }
+
+  async pollControl(deviceId: string) {
+    return await this.withRepository(async (repository) => ({ controlActions: await repository.listControlActionsForDevice(deviceId) }));
+  }
+
+  async recoverDevice(deviceId: string) {
+    return await this.withRepository(async (repository) => ({ recoverableRuns: await repository.listRecoverableRunsForDevice(deviceId) }));
+  }
+
   async ackLease(leaseId: string, accepted: boolean, reason?: string) {
     return await this.withRepository(async (repository) => {
       const deviceId = await this.mustDeviceIdFromLease(repository, leaseId);

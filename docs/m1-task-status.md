@@ -18,8 +18,8 @@ This document maps the reviewed M1 technical-design tasks (`AL-TD-*`) to the rep
 | AL-TD-002 | Canonical enums and Task / Run / Lease / Device state matrix | Partial | `src/domain/status.ts`; `test/status.test.ts`; in-memory transitions in `src/control-plane/in-memory.ts`; PostgreSQL statement contracts in `src/db/postgres-statements.ts`; `src/control-plane/postgres.ts`; `src/control-plane/port.ts` | DB-level enum/check usage exists in migration and SQL contracts; `src/db/postgres-repository.ts` maps rowCount / replay / conflict cases to typed domain errors; server now has an opt-in PostgreSQL control-plane mode. Still missing live DSN tests, concurrent DB verification, `lease/renew`, and a standalone state-transition executor. |
 | AL-TD-003 | Device / Runner / capability declared/grant and workdir grant | Partial | `al_device`, `al_runner`, `al_capability_declared`, `al_capability_grant`, `al_workdir_grant`; `src/domain/policy.ts`; in-memory capability/workdir grants; pull-time policy decisions; HTTP register-time grant seeding; policy SQL lookup contracts; PostgreSQL pull path now evaluates static grants before leasing | Still missing explicit grant management APIs, revoke/update APIs, and scheduler-level policy blocking semantics. |
 | AL-TD-004 | Task API + Main Agent MVP + `task_spec` | Partial | `POST /api/v1/tasks`; `GET /api/v1/tasks/:taskId`; task idempotency; M1 inline Main Agent shortcut documented in `STATE_TRANSITIONS.create_task`; `al_task.idempotency_signature`; `findTaskByIdempotencyKey`; `createTaskWithInitialRun` | Standalone Main Agent / TaskSpecBuilder component is not implemented; live repository adapter still needs to map idempotency signature mismatches to `AL_IDEMPOTENCY_CONFLICT`. |
-| AL-TD-005 | Run + `al_run_lease` + active lease partial unique index + pull/ack/renew | Partial | `al_run`, `al_run_lease`, `uq_al_run_lease_active`; `agentlet/pull`; `agentlet/ack`; lease tests; `src/db/transaction.ts`; `src/db/postgres-statements.ts`; `src/db/postgres-repository.ts`; `src/db/pg-client.ts`; `src/control-plane/postgres.ts`; `scripts/db-smoke.mjs`; PostgreSQL server mode config | Repository now supports task/device/run/lease/event lookup, device register/auth/heartbeat, policy-before-lease dispatch, and opt-in server mode via `AGENTLINK_STORAGE=postgres`. Remaining gaps: `renew` endpoint and real concurrent pull / unique violation tests against a live DSN. |
-| AL-TD-006 | `control_actions` / poll + recover + cancel | Partial | State matrix has planning entries for recover/cancel/revoke; `cancelTask` SQL contract covers external task cancel state updates | No HTTP protocol, control_actions polling, or runtime recover implementation yet. |
+| AL-TD-005 | Run + `al_run_lease` + active lease partial unique index + pull/ack/renew | Partial | `al_run`, `al_run_lease`, `uq_al_run_lease_active`; `agentlet/pull`; `agentlet/ack`; lease tests; `src/db/transaction.ts`; `src/db/postgres-statements.ts`; `src/db/postgres-repository.ts`; `src/db/pg-client.ts`; `src/control-plane/postgres.ts`; `scripts/db-smoke.mjs`; PostgreSQL server mode config | Repository now supports task/device/run/lease/event lookup, device register/auth/heartbeat, policy-before-lease dispatch, opt-in server mode via `AGENTLINK_STORAGE=postgres`, and cancel/recover lookup contracts. Remaining gaps: `renew` endpoint and real concurrent pull / unique violation tests against a live DSN. |
+| AL-TD-006 | `control_actions` / poll + recover + cancel | Partial | `POST /api/v1/tasks/:taskId/cancel`; `POST /api/v1/agentlet/control/poll`; `POST /api/v1/agentlet/recover`; in-memory control actions; PostgreSQL `cancelTask`, `listControlActionsForDevice`, `listRecoverableRunsForDevice`; HTTP and repository tests | Minimal cancel/control/recover protocol exists. Remaining gaps: control action ack/retention policy, `lease/renew` control envelope, richer recover decision payload (`continue` / `discard`), and device revoke cascade API. |
 | AL-TD-006B | Retry watcher, `attempt_no` / `retry_count` / `max_retries`, late-complete protection | Partial | `src/domain/retry.ts`; `completeRun(FAILED)` creates a new queued run attempt when retryable; `createRetryRunAttempt` and `expireActiveLease` SQL contracts; tests cover retryable failure and SQL retry/expiry predicates | Repository complete/expire paths now create retry attempts in the same transaction when retry policy allows. Live lease-expiry watcher, run-timeout watcher, and real late-complete race tests remain. |
 | AL-TD-007 | Codex Runner Adapter | Not started | None | Implement agentlet-side Codex adapter and local execution contract. |
 | AL-TD-008 | Telegram Channel Adapter and progress throttling | Not started | None | Implement Telegram inbound/outbound, idempotency key mapping, and progress delivery policy. |
@@ -45,8 +45,8 @@ This document maps the reviewed M1 technical-design tasks (`AL-TD-*`) to the rep
 ## Next recommended order
 
 1. Run live PostgreSQL DSN smoke and add real concurrent pull / unique violation tests for the new `AGENTLINK_STORAGE=postgres` mode.
-2. Add AL-TD-003 grant management/revoke APIs.
-3. Implement AL-TD-006 control actions / cancel / recover.
+2. Finish AL-TD-006 remaining control protocol pieces: `lease/renew` control envelope, control action ack/retention, and recover `continue/discard` decisions.
+3. Add AL-TD-003 grant management/revoke APIs.
 4. Implement AL-TD-007 Codex Runner Adapter.
 5. Implement AL-TD-008 Telegram adapter and then run the first real end-to-end M1 loop.
 
@@ -103,3 +103,15 @@ This document maps the reviewed M1 technical-design tasks (`AL-TD-*`) to the rep
 - Extended `PostgreSqlRepository` to cover device registration, device auth/heartbeat, task/run/lease/event lookup, policy-before-lease dispatch, and static grant/workdir decision recording before `leaseSpecificQueuedRun`.
 - Added SQL contracts and tests for register/auth/heartbeat, dispatch candidate lookup, policy decision insertion, policy-denied no-lease behavior, and configured server storage mode. Test count increased to 66.
 - Remaining gaps: no live `AGENTLINK_DATABASE_URL` run in this environment, no real concurrent `SKIP LOCKED` / partial unique index test yet, no `lease/renew`, and no control_actions / recover / cancel HTTP protocol yet.
+
+## 2026-06-11 AL-TD-006 minimal control protocol update
+
+- Added minimal task cancellation and agentlet control polling:
+  - `POST /api/v1/tasks/:taskId/cancel`
+  - `POST /api/v1/agentlet/control/poll`
+  - `POST /api/v1/agentlet/recover`
+- Added `ControlActionRecord` and `RecoverableRunRecord` domain contracts. External DTOs stay snake_case: `control_actions`, `run_id`, `lease_id`, `recoverable_runs`.
+- In memory mode, canceling a running task moves Task / Run / active Lease to `CANCELLED`, emits a `cancel_run` control action, and removes the run from recoverable active leases.
+- In PostgreSQL repository contracts, `listControlActionsForDevice` derives cancel actions from cancelled leases, while `listRecoverableRunsForDevice` only returns active leases for `LEASED` / `RUNNING` runs.
+- Added unit / HTTP / repository / SQL contract tests. Test count increased to 70.
+- Remaining gaps: no control action ack/retention table, no `lease/renew` control envelope, no device revoke cascade API, no real agentlet daemon consuming these actions, and no live DSN validation in this environment.

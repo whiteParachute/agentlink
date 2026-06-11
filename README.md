@@ -32,9 +32,9 @@ Modern AI work often spans several machines, networks, tools, and message channe
 Agentlink is in early development. The repository currently contains:
 
 - a Node.js 22 + TypeScript control-plane skeleton;
-- a minimal HTTP API for tasks, devices, leases, progress, and completion;
+- a minimal HTTP API for tasks, devices, leases, cancel/control/recover, progress, and completion;
 - an in-memory implementation for executable protocol tests;
-- PostgreSQL schema, SQL contracts, repository adapter, `pg` runtime adapter, and opt-in PostgreSQL server mode wiring;
+- PostgreSQL schema, SQL contracts, repository adapter, `pg` runtime adapter, opt-in PostgreSQL server mode wiring, and control/recover contracts;
 - GitHub Actions CI and Node built-in tests.
 
 Not yet included: live PostgreSQL DSN/concurrency verification, Telegram adapter, device agentlet daemon, Codex runner adapter, or production deployment guide.

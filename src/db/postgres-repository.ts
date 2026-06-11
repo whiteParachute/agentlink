@@ -3,11 +3,13 @@ import { AgentlinkError } from '../control-plane/errors.js';
 import type { CreateTaskInput } from '../control-plane/in-memory.js';
 import type {
   CapabilityGrantRecord,
+  ControlActionRecord,
   DeviceRecord,
   Domain,
   JsonRecord,
   LeaseRecord,
   PolicyDecisionRecord,
+  RecoverableRunRecord,
   RunEventRecord,
   RunRecord,
   RunnerRecord,
@@ -520,6 +522,36 @@ export class PostgreSqlRepository {
     if (row.run) mapped.run = mapRun(row.run);
     if (row.lease) mapped.lease = mapLease(row.lease);
     return mapped;
+  }
+
+  async listControlActionsForDevice(deviceId: string, limit = 50): Promise<ControlActionRecord[]> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.listControlActionsForDevice, [deviceId, limit]);
+    return result.rows.map((row) => {
+      const lease = mapLease(row.lease);
+      return {
+        type: 'cancel_run',
+        runId: lease.runId,
+        leaseId: lease.id,
+        reason: lease.expireReason ?? 'user_cancelled',
+      };
+    });
+  }
+
+  async listRecoverableRunsForDevice(deviceId: string, limit = 50): Promise<RecoverableRunRecord[]> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.listRecoverableRunsForDevice, [deviceId, limit]);
+    return result.rows.map((row) => {
+      const lease = mapLease(row.lease);
+      const run = mapRun(row.run);
+      return {
+        runId: run.id,
+        taskId: run.taskId,
+        leaseId: lease.id,
+        runStatus: run.status,
+        leaseStatus: lease.status,
+        instruction: run.instruction,
+        expiresAt: lease.expiresAt,
+      };
+    });
   }
 
   private async createRetryRunAttemptInTransaction(client: SqlClient, previousRunId: string, now: string): Promise<{ run: RunRecord; task: TaskRecord } | undefined> {

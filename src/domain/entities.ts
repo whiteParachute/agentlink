@@ -139,3 +139,20 @@ export interface RunEventRecord {
   payload: JsonRecord;
   emittedAt: string;
 }
+
+export interface ControlActionRecord {
+  type: 'cancel_run';
+  runId: string;
+  leaseId: string;
+  reason: string;
+}
+
+export interface RecoverableRunRecord {
+  runId: string;
+  taskId: string;
+  leaseId: string;
+  runStatus: RunStatus;
+  leaseStatus: LeaseStatus;
+  instruction: JsonRecord;
+  expiresAt: string;
+}

@@ -694,6 +694,31 @@ FROM updated_task t
 LEFT JOIN updated_run r ON r.task_id = t.id
 LEFT JOIN updated_lease l ON l.run_id = r.id;
 `,
+
+  listControlActionsForDevice: `
+SELECT row_to_json(l) AS lease, row_to_json(r) AS run
+FROM al_run_lease l
+JOIN al_run r ON r.id = l.run_id
+WHERE l.device_id = $1
+  AND l.status = 'CANCELLED'
+  AND l.cancelled_at IS NOT NULL
+  AND r.status = 'CANCELLED'
+ORDER BY l.cancelled_at DESC, l.id ASC
+LIMIT $2;
+`,
+
+  listRecoverableRunsForDevice: `
+SELECT row_to_json(l) AS lease, row_to_json(r) AS run, row_to_json(t) AS task
+FROM al_run_lease l
+JOIN al_run r ON r.id = l.run_id
+JOIN al_task t ON t.id = r.task_id
+WHERE l.device_id = $1
+  AND l.status IN ${ACTIVE_LEASE_STATUSES_SQL}
+  AND r.current_lease_id = l.id
+  AND r.status IN ('LEASED', 'RUNNING')
+ORDER BY l.updated_at ASC, l.id ASC
+LIMIT $2;
+`,
 } as const;
 
 export type PostgreSqlStatementName = keyof typeof PostgreSqlStatements;
