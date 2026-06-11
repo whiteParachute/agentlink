@@ -1,0 +1,29 @@
+{
+  "name": "agentlink",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Independent multi-device agent control plane.",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "npm run typecheck && npm test",
+    "dev": "node --watch --enable-source-maps dist/server.js",
+    "start": "node --enable-source-maps dist/server.js",
+    "test": "npm run build && node --test dist/**/*.test.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "agent",
+    "control-plane",
+    "agentlet",
+    "codex"
+  ],
+  "license": "UNLICENSED",
+  "devDependencies": {
+    "@types/node": "^22.15.31",
+    "typescript": "^5.8.3"
+  }
+}
