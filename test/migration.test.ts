@@ -17,12 +17,20 @@ test('initial migration contains active lease partial unique index', () => {
   assert.match(sql, /WHERE status IN \('ISSUED', 'ACKED', 'RENEWED'\)/i);
 });
 
+test('initial migration stores idempotency signatures for conflict detection', () => {
+  const sql = loadInitialMigration();
+  assert.match(sql, /idempotency_signature text NOT NULL/i);
+  assert.match(sql, /UNIQUE \(domain, idempotency_key\)/i);
+});
+
 test('initial migration includes retry attempt fields', () => {
   const sql = loadInitialMigration();
   assert.match(sql, /attempt_no integer NOT NULL DEFAULT 1/i);
   assert.match(sql, /retry_count integer NOT NULL DEFAULT 0/i);
   assert.match(sql, /max_retries integer NOT NULL DEFAULT 1/i);
   assert.match(sql, /retry_of_run_id uuid REFERENCES al_run\(id\)/i);
+  assert.match(sql, /CREATE UNIQUE INDEX uq_al_run_task_attempt/i);
+  assert.match(sql, /ON al_run\(task_id, attempt_no\)/i);
 });
 
 test('initial migration persists terminal complete replay hash on leases', () => {

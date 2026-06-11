@@ -19,6 +19,8 @@ export class RollbackFailureError extends Error {
   }
 }
 
+// The client must represent one checked-out database connection, not a pool
+// object that may route BEGIN / work / COMMIT queries to different connections.
 export async function withTransaction<T>(client: SqlClient, work: (tx: SqlClient) => Promise<T>): Promise<T> {
   await client.query('BEGIN');
   try {

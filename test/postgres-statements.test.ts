@@ -6,9 +6,22 @@ test('PostgreSQL active lease status literal matches Draft 3 active definition',
   assert.equal(ACTIVE_LEASE_STATUSES_SQL, "('ISSUED', 'ACKED', 'RENEWED')");
 });
 
-test('leaseNextQueuedRun locks queued runs and relies on the active lease database guard', () => {
+test('task creation stores idempotency signature and creates initial queued run', () => {
+  assert.match(PostgreSqlStatements.findTaskByIdempotencyKey, /t\.idempotency_key = \$2/i);
+  assert.match(PostgreSqlStatements.findTaskByIdempotencyKey, /JOIN al_run r ON r\.id = t\.current_run_id/i);
+
+  const sql = getPostgreSqlStatement('createTaskWithInitialRun');
+  assert.match(sql, /idempotency_signature/i);
+  assert.match(sql, /'QUEUED'/i);
+  assert.match(sql, /INSERT INTO al_run/i);
+  assert.match(sql, /attempt_no/i);
+  assert.match(sql, /SET current_run_id = r\.id/i);
+});
+
+test('leaseNextQueuedRun locks only queued run rows and relies on active lease database guard', () => {
   const sql = getPostgreSqlStatement('leaseNextQueuedRun');
-  assert.match(sql, /FOR UPDATE SKIP LOCKED/i);
+  assert.match(sql, /FOR UPDATE OF r SKIP LOCKED/i);
+  assert.doesNotMatch(sql, /JOIN al_task t ON t\.id = r\.task_id/i);
   assert.match(sql, /r\.status = 'QUEUED'/i);
   assert.match(sql, /active_lease\.status IN \('ISSUED', 'ACKED', 'RENEWED'\)/i);
   assert.match(sql, /INSERT INTO al_run_lease/i);
@@ -19,6 +32,7 @@ test('leaseNextQueuedRun locks queued runs and relies on the active lease databa
 test('ack statements require the lease state that the protocol allows', () => {
   assert.match(PostgreSqlStatements.ackLeaseAccepted, /l\.status = 'ISSUED'/i);
   assert.match(PostgreSqlStatements.ackLeaseAccepted, /r\.status = 'LEASED'/i);
+  assert.match(PostgreSqlStatements.ackLeaseAccepted, /started_at = COALESCE\(r\.started_at, \$3\)/i);
   assert.match(PostgreSqlStatements.ackLeaseAccepted, /SET status = 'ACKED'/i);
   assert.match(PostgreSqlStatements.ackLeaseRejected, /SET status = 'REJECTED'/i);
   assert.match(PostgreSqlStatements.ackLeaseRejected, /current_lease_id = NULL/i);
@@ -28,12 +42,15 @@ test('progress and complete statements require an acknowledged running active le
   assert.match(PostgreSqlStatements.appendAgentletProgress, /r\.status = 'RUNNING'/i);
   assert.match(PostgreSqlStatements.appendAgentletProgress, /l\.status IN \('ACKED', 'RENEWED'\)/i);
   assert.match(PostgreSqlStatements.appendAgentletProgress, /ON CONFLICT \(run_id, seq\) DO NOTHING/i);
+  assert.match(PostgreSqlStatements.findAgentletProgressBySeq, /WHERE run_id = \$1/i);
+  assert.match(PostgreSqlStatements.findAgentletProgressBySeq, /AND seq = \$2/i);
 
   assert.match(PostgreSqlStatements.completeRun, /FOR UPDATE OF r, l/i);
   assert.match(PostgreSqlStatements.completeRun, /l\.run_id = r\.id/i);
   assert.match(PostgreSqlStatements.completeRun, /r\.current_lease_id = l\.id/i);
   assert.match(PostgreSqlStatements.completeRun, /l\.status IN \('ACKED', 'RENEWED'\)/i);
   assert.match(PostgreSqlStatements.completeRun, /terminal_payload_hash = \$7/i);
+  assert.match(PostgreSqlStatements.completeRun, /metrics = COALESCE\(\$6::jsonb, r\.metrics\)/i);
   assert.match(PostgreSqlStatements.completeRun, /UPDATE al_task t/i);
   assert.match(PostgreSqlStatements.completeRun, /END::al_task_status/i);
 });
@@ -43,4 +60,28 @@ test('terminal complete replay is scoped to the same run and lease', () => {
   assert.match(PostgreSqlStatements.replayTerminalComplete, /r\.id = \$1/i);
   assert.match(PostgreSqlStatements.replayTerminalComplete, /l\.terminal_payload_hash = \$3/i);
   assert.match(PostgreSqlStatements.replayTerminalComplete, /JOIN al_task t ON t\.id = r\.task_id/i);
+});
+
+test('retry and lease-expiry statements preserve new-attempt model', () => {
+  assert.match(PostgreSqlStatements.createRetryRunAttempt, /previous\.attempt_no \+ 1/i);
+  assert.match(PostgreSqlStatements.createRetryRunAttempt, /retry_of_run_id/i);
+  assert.match(PostgreSqlStatements.createRetryRunAttempt, /t\.retry_count < t\.max_retries/i);
+  assert.match(PostgreSqlStatements.createRetryRunAttempt, /t\.current_run_id = previous\.id/i);
+  assert.match(PostgreSqlStatements.createRetryRunAttempt, /t\.status IN \('RUNNING', 'FAILED'\)/i);
+  assert.match(PostgreSqlStatements.createRetryRunAttempt, /retry_count = t\.retry_count \+ 1/i);
+  assert.match(PostgreSqlStatements.createRetryRunAttempt, /current_run_id = r\.id/i);
+
+  assert.match(PostgreSqlStatements.expireActiveLease, /l\.expires_at <= \$2/i);
+  assert.match(PostgreSqlStatements.expireActiveLease, /SET status = 'EXPIRED'/i);
+  assert.match(PostgreSqlStatements.expireActiveLease, /SET status = 'TIMED_OUT'/i);
+  assert.match(PostgreSqlStatements.expireActiveLease, /SET status = 'FAILED'/i);
+  assert.match(PostgreSqlStatements.expireActiveLease, /t\.current_run_id = r\.id/i);
+});
+
+test('cancelTask can cancel current non-terminal task/run/lease without agentlet complete', () => {
+  assert.match(PostgreSqlStatements.cancelTask, /t\.status NOT IN \('SUCCEEDED', 'FAILED', 'CANCELLED'\)/i);
+  assert.match(PostgreSqlStatements.cancelTask, /r\.status NOT IN \('SUCCEEDED', 'FAILED', 'CANCELLED', 'TIMED_OUT'\)/i);
+  assert.match(PostgreSqlStatements.cancelTask, /l\.status IN \('ISSUED', 'ACKED', 'RENEWED'\)/i);
+  assert.match(PostgreSqlStatements.cancelTask, /SET status = 'CANCELLED'/i);
+  assert.match(PostgreSqlStatements.cancelTask, /LEFT JOIN updated_lease/i);
 });

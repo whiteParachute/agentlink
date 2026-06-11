@@ -57,6 +57,26 @@ BEGIN
   ) THEN
     RAISE EXCEPTION 'missing al_device.network_scope in schema ${schema}';
   END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = '${schema}'
+      AND table_name = 'al_task'
+      AND column_name = 'idempotency_signature'
+  ) THEN
+    RAISE EXCEPTION 'missing al_task.idempotency_signature in schema ${schema}';
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_indexes
+    WHERE schemaname = '${schema}'
+      AND tablename = 'al_run'
+      AND indexname = 'uq_al_run_task_attempt'
+  ) THEN
+    RAISE EXCEPTION 'missing uq_al_run_task_attempt in schema ${schema}';
+  END IF;
 END $$;
 DROP SCHEMA ${schema} CASCADE;
 `;

@@ -22,6 +22,7 @@ CREATE TABLE al_task (
   retry_count integer NOT NULL DEFAULT 0 CHECK (retry_count >= 0),
   max_retries integer NOT NULL DEFAULT 1 CHECK (max_retries >= 0),
   idempotency_key text NOT NULL,
+  idempotency_signature text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (domain, idempotency_key)
@@ -196,6 +197,7 @@ CREATE TABLE al_audit_log (
 );
 
 CREATE INDEX idx_al_task_domain_status_created ON al_task(domain, status, created_at DESC);
+CREATE UNIQUE INDEX uq_al_run_task_attempt ON al_run(task_id, attempt_no);
 CREATE INDEX idx_al_run_task ON al_run(task_id);
 CREATE INDEX idx_al_run_domain_status ON al_run(domain, status);
 CREATE INDEX idx_al_run_lease_device_status_expires ON al_run_lease(device_id, status, expires_at);
