@@ -1,5 +1,5 @@
 -- Agentlink M1 initial schema spike.
--- Source of truth: Agentlink M0 technical design Draft 3.
+-- Source of truth: Agentlink M1 technical design Draft 3.
 
 BEGIN;
 

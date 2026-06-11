@@ -14,6 +14,14 @@ test('active lease statuses match Draft 3 definition', () => {
   assert.equal(isActiveLeaseStatus('COMPLETED'), false);
 });
 
+
+test('create_task transition documents the M1 inline Main Agent shortcut', () => {
+  const transition = STATE_TRANSITIONS.find((candidate) => candidate.event === 'create_task');
+  assert.ok(transition);
+  assert.equal(transition.task?.to, 'QUEUED');
+  assert.equal(transition.run?.to, 'QUEUED');
+});
+
 test('state matrix includes four-entity recovery and revoke events', () => {
   const events = new Set(STATE_TRANSITIONS.map((transition) => transition.event));
   assert.equal(events.has('device_heartbeat_timeout'), true);
@@ -21,6 +29,16 @@ test('state matrix includes four-entity recovery and revoke events', () => {
   assert.equal(events.has('agentlet_recover_continue'), true);
   assert.equal(events.has('agentlet_recover_discard'), true);
   assert.equal(events.has('agentlet_ack_reject'), true);
+});
+
+
+
+test('device heartbeat timeout leaves Run and Lease unchanged until expiry watcher decides', () => {
+  const transition = STATE_TRANSITIONS.find((candidate) => candidate.event === 'device_heartbeat_timeout');
+  assert.ok(transition);
+  assert.equal(transition.run?.to, undefined);
+  assert.equal(transition.lease?.to, undefined);
+  assert.equal(transition.device?.to, 'OFFLINE');
 });
 
 test('retryable timeout events create a new run attempt', () => {

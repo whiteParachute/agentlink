@@ -35,13 +35,15 @@ export type LifecycleEvent =
 export interface StateTransition {
   event: LifecycleEvent;
   task?: { from?: readonly TaskStatus[]; to: TaskStatus };
-  run?: { from?: readonly RunStatus[]; to: RunStatus; createsNewAttempt?: boolean };
-  lease?: { from?: readonly LeaseStatus[]; to: LeaseStatus };
+  run?: { from?: readonly RunStatus[]; to?: RunStatus; createsNewAttempt?: boolean };
+  lease?: { from?: readonly LeaseStatus[]; to?: LeaseStatus };
   device?: { from?: readonly DeviceStatus[]; to: DeviceStatus };
 }
 
 export const STATE_TRANSITIONS: readonly StateTransition[] = [
-  { event: 'create_task', task: { to: 'CREATED' } },
+  // M1 shortcut: TaskSpecBuilder/Main Agent is inline in createTask, so a created task is immediately queued.
+  // The explicit CREATED -> main_agent_accept path is kept for the later standalone Main Agent stage.
+  { event: 'create_task', task: { to: 'QUEUED' }, run: { to: 'QUEUED' } },
   { event: 'main_agent_accept', task: { from: ['CREATED'], to: 'QUEUED' }, run: { to: 'QUEUED' } },
   { event: 'agentlet_pull_lease', task: { from: ['QUEUED'], to: 'RUNNING' }, run: { from: ['QUEUED'], to: 'LEASED' }, lease: { to: 'ISSUED' }, device: { from: ['ONLINE'], to: 'ONLINE' } },
   { event: 'agentlet_ack_accept', run: { from: ['LEASED'], to: 'RUNNING' }, lease: { from: ['ISSUED'], to: 'ACKED' }, device: { from: ['ONLINE'], to: 'ONLINE' } },
@@ -52,7 +54,7 @@ export const STATE_TRANSITIONS: readonly StateTransition[] = [
   { event: 'complete_failed_terminal', task: { from: ['RUNNING'], to: 'FAILED' }, run: { from: ['RUNNING'], to: 'FAILED' }, lease: { from: ['ACKED', 'RENEWED'], to: 'COMPLETED' } },
   { event: 'lease_expired_retryable', task: { from: ['RUNNING'], to: 'QUEUED' }, run: { from: ['LEASED', 'RUNNING'], to: 'TIMED_OUT', createsNewAttempt: true }, lease: { from: ACTIVE_LEASE_STATUSES, to: 'EXPIRED' } },
   { event: 'lease_expired_terminal', task: { from: ['RUNNING'], to: 'FAILED' }, run: { from: ['LEASED', 'RUNNING'], to: 'TIMED_OUT' }, lease: { from: ACTIVE_LEASE_STATUSES, to: 'EXPIRED' } },
-  { event: 'device_heartbeat_timeout', run: { from: ['LEASED', 'RUNNING'], to: 'RUNNING' }, lease: { from: ACTIVE_LEASE_STATUSES, to: 'RENEWED' }, device: { from: ['ONLINE'], to: 'OFFLINE' } },
+  { event: 'device_heartbeat_timeout', run: { from: ['LEASED', 'RUNNING'] }, lease: { from: ACTIVE_LEASE_STATUSES }, device: { from: ['ONLINE'], to: 'OFFLINE' } },
   { event: 'device_revoke', task: { from: ['QUEUED', 'RUNNING'], to: 'CANCELLED' }, run: { from: ['QUEUED', 'LEASED', 'RUNNING'], to: 'CANCELLED' }, lease: { from: ACTIVE_LEASE_STATUSES, to: 'CANCELLED' }, device: { from: ['REGISTERED', 'ONLINE', 'OFFLINE', 'SUSPENDED'], to: 'REVOKED' } },
   { event: 'agentlet_recover_continue', run: { from: ['RUNNING'], to: 'RUNNING' }, lease: { from: ['ACKED', 'RENEWED'], to: 'RENEWED' }, device: { from: ['OFFLINE'], to: 'ONLINE' } },
   { event: 'agentlet_recover_discard', task: { from: ['RUNNING'], to: 'QUEUED' }, run: { from: ['LEASED', 'RUNNING'], to: 'TIMED_OUT', createsNewAttempt: true }, lease: { from: ACTIVE_LEASE_STATUSES, to: 'EXPIRED' }, device: { from: ['OFFLINE'], to: 'ONLINE' } },

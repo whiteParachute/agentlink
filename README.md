@@ -13,10 +13,22 @@ Telegram -> Agentlink Control Plane -> claw-tenc agentlet -> Codex CLI -> Telegr
 - M1 uses a single personal domain, one always-on device (`claw-tenc`), and one required runner (`codex`).
 - No work-domain integration, no DAG planner, no multi-device fallback, and no AgentDock chat-session reuse in M1.
 
-## Current skeleton
+## Current M1 slice
 
 - Node.js 22 + TypeScript strict mode.
-- Built-in HTTP server with `/healthz`, `/readyz`, and version metadata.
+- Built-in HTTP server with `/healthz`, `/readyz`, and `/api/v1/meta`.
+- In-memory control-plane repository for the first executable M1 slice.
+- Minimal Task / Run / Lease / Device API loop:
+  - `POST /api/v1/tasks`
+  - `GET /api/v1/tasks/:taskId`
+  - `GET /api/v1/runs/:runId`
+  - `GET /api/v1/runs/:runId/events`
+  - `POST /api/v1/devices/register`
+  - `POST /api/v1/devices/:deviceId/heartbeat`
+  - `POST /api/v1/agentlet/pull`
+  - `POST /api/v1/agentlet/ack`
+  - `POST /api/v1/agentlet/progress`
+  - `POST /api/v1/agentlet/complete`
 - PostgreSQL schema migration spike under `migrations/`.
 - Domain state machine helpers under `src/domain/`.
 - Node built-in test runner.
