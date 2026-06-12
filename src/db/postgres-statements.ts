@@ -798,9 +798,9 @@ WITH target AS (
   JOIN al_run r ON r.id = l.run_id
   WHERE l.id = $1
     AND l.device_id = $2
-    AND l.status IN ${ACTIVE_LEASE_STATUSES_SQL}
+    AND l.status IN ('ACKED', 'RENEWED')
     AND r.current_lease_id = l.id
-    AND r.status IN ('LEASED', 'RUNNING')
+    AND r.status = 'RUNNING'
   FOR UPDATE OF r, l
 ), updated_lease AS (
   UPDATE al_run_lease l

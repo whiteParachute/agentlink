@@ -170,7 +170,8 @@ test('control poll and recover statements keep cancel and active recovery scopes
   assert.match(PostgreSqlStatements.listRecoverableRunsForDevice, /l\.status IN \('ISSUED', 'ACKED', 'RENEWED'\)/i);
   assert.match(PostgreSqlStatements.listRecoverableRunsForDevice, /r\.current_lease_id = l\.id/i);
   assert.match(PostgreSqlStatements.listRecoverableRunsForDevice, /r\.status IN \('LEASED', 'RUNNING'\)/i);
-  assert.match(PostgreSqlStatements.recoverContinue, /l\.status IN \('ISSUED', 'ACKED', 'RENEWED'\)/i);
+  assert.match(PostgreSqlStatements.recoverContinue, /l\.status IN \('ACKED', 'RENEWED'\)/i);
+  assert.match(PostgreSqlStatements.recoverContinue, /r\.status = 'RUNNING'/i);
   assert.match(PostgreSqlStatements.recoverContinue, /SET status = 'RENEWED'/i);
   assert.match(PostgreSqlStatements.recoverContinue, /SET status = 'RUNNING'/i);
   assert.match(PostgreSqlStatements.recoverDiscard, /SET status = 'EXPIRED'/i);

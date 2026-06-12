@@ -287,6 +287,10 @@ test('lease renew extends an executing lease and recovery decisions continue or 
     () => controlPlane.renewLease(first.leaseId),
     (error) => error instanceof AgentlinkError && error.code === 'AL_STATE_CONFLICT',
   );
+  assert.throws(
+    () => controlPlane.decideRecovery({ deviceId: registered.device.id, leaseId: first.leaseId, decision: 'continue' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_STATE_CONFLICT',
+  );
   controlPlane.ackLease(first.leaseId, true);
 
   const renewed = controlPlane.renewLease(first.leaseId);

@@ -420,6 +420,7 @@ export class InMemoryControlPlane {
       throw new AgentlinkError(409, 'AL_LEASE_EXPIRED', 'Lease is not recoverable');
     }
     if (input.decision === 'continue') {
+      this.mustHaveExecutingLease(run, lease.id);
       const renewed = this.renewLeaseForRecovery(run, lease);
       return { decision: input.decision, ...renewed };
     }

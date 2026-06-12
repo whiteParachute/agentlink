@@ -290,6 +290,52 @@ test('malformed JSON returns AL_BAD_JSON instead of internal error', async () =>
   });
 });
 
+test('HTTP recover continue requires an acknowledged running lease', async () => {
+  await withServer(async (baseUrl) => {
+    const register = await postJson(baseUrl, '/api/v1/devices/register', {
+      display_name: 'claw-tenc',
+      owner_user_id: 'whiteParachute',
+      capability_grants: ['codex:exec'],
+      workdir_grants: [{ path_prefix: DEFAULT_WORKSPACE, access_mode: 'read_write' }],
+    });
+    assert.equal(register.status, 201);
+    const registered = (await register.json()) as { device_id: string; runner_id: string; device_secret: string };
+    const auth = { authorization: `Bearer ${registered.device_secret}` };
+    await postJson(baseUrl, `/api/v1/devices/${registered.device_id}/heartbeat`, {}, auth);
+
+    const taskResponse = await postJson(
+      baseUrl,
+      '/api/v1/tasks',
+      { source: 'telegram', source_ref: 'telegram:chat:recover-unacked', payload: { text: 'recover unacked' } },
+      { 'idempotency-key': 'telegram:chat:recover-unacked' },
+    );
+    assert.equal(taskResponse.status, 201);
+    const pull = await postJson(baseUrl, '/api/v1/agentlet/pull', { device_id: registered.device_id, runner_id: registered.runner_id }, auth);
+    assert.equal(pull.status, 200);
+    const pulled = (await pull.json()) as { lease_id: string };
+
+    const unackedContinue = await postJson(
+      baseUrl,
+      '/api/v1/agentlet/recover/decision',
+      { device_id: registered.device_id, lease_id: pulled.lease_id, decision: 'continue' },
+      auth,
+    );
+    assert.equal(unackedContinue.status, 409);
+    assert.equal(((await unackedContinue.json()) as { error: { code: string } }).error.code, 'AL_STATE_CONFLICT');
+
+    const ack = await postJson(baseUrl, '/api/v1/agentlet/ack', { device_id: registered.device_id, lease_id: pulled.lease_id, accepted: true }, auth);
+    assert.equal(ack.status, 200);
+    const acknowledgedContinue = await postJson(
+      baseUrl,
+      '/api/v1/agentlet/recover/decision',
+      { device_id: registered.device_id, lease_id: pulled.lease_id, decision: 'continue' },
+      auth,
+    );
+    assert.equal(acknowledgedContinue.status, 200);
+    assert.equal(((await acknowledgedContinue.json()) as { decision: string; lease: { status: string }; run: { status: string } }).lease.status, 'RENEWED');
+  });
+});
+
 test('HTTP cancel publishes control_actions and recover returns active leases only', async () => {
   await withServer(async (baseUrl) => {
     const register = await postJson(baseUrl, '/api/v1/devices/register', {
