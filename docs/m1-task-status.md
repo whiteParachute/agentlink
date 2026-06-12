@@ -21,7 +21,7 @@ This document maps the reviewed M1 technical-design tasks (`AL-TD-*`) to the rep
 | AL-TD-005 | Run + `al_run_lease` + active lease partial unique index + pull/ack/renew | Partial | `al_run`, `al_run_lease`, `uq_al_run_lease_active`; `agentlet/pull`; `agentlet/ack`; `agentlet/lease/renew`; lease tests; `src/db/transaction.ts`; `src/db/postgres-statements.ts`; `src/db/postgres-repository.ts`; `src/db/pg-client.ts`; `src/control-plane/postgres.ts`; `scripts/db-smoke.mjs`; PostgreSQL server mode config | Repository now supports task/device/run/lease/event lookup, device register/auth/heartbeat, policy-before-lease dispatch, opt-in server mode via `AGENTLINK_STORAGE=postgres`, lease renew, and control/recover lookup contracts. Remaining gap: real concurrent pull / renew / unique violation tests against a live DSN. |
 | AL-TD-006 | `control_actions` / poll + recover + cancel | Partial | `POST /api/v1/tasks/:taskId/cancel`; `POST /api/v1/agentlet/control/poll`; `POST /api/v1/agentlet/control/ack`; `POST /api/v1/agentlet/recover`; `POST /api/v1/agentlet/recover/decision`; `POST /api/v1/devices/:deviceId/revoke`; `al_control_action`; in-memory control actions; PostgreSQL `cancelTask`, `listControlActionsForDevice`, `ackControlAction`, `listRecoverableRunsForDevice`, `recoverContinue`, `recoverDiscard`, `revokeDevice`; HTTP and repository tests | Minimal M1 control protocol now covers cancel, poll, ack retention, renew envelope, recover continue, recover discard, and device revoke cascade. Remaining gaps: real agentlet consumption, live DSN validation, and long-term control-action retention cleanup policy. |
 | AL-TD-006B | Retry watcher, `attempt_no` / `retry_count` / `max_retries`, late-complete protection | Partial | `src/domain/retry.ts`; `completeRun(FAILED)` creates a new queued run attempt when retryable; `createRetryRunAttempt` and `expireActiveLease` SQL contracts; tests cover retryable failure and SQL retry/expiry predicates | Repository complete/expire paths now create retry attempts in the same transaction when retry policy allows. Live lease-expiry watcher, run-timeout watcher, and real late-complete race tests remain. |
-| AL-TD-007 | Codex Runner Adapter | Not started | None | Implement agentlet-side Codex adapter and local execution contract. |
+| AL-TD-007 | Codex Runner Adapter | Partial | `src/agentlet/runner.ts`; `src/agentlet/codex-runner.ts`; `test/codex-runner.test.ts`; README status update | Minimal agentlet-side runner contract and Codex CLI adapter skeleton exist, including command construction, workspace root validation, local env allowlist, stdout/stderr/final progress mapping, non-zero failure, timeout/cancel handling, and fake-runner tests. Still missing a long-running agentlet daemon that consumes leases, real Codex CLI smoke on claw-tenc, local process cleanup hardening, and integration with control-plane renew/progress/complete loop. |
 | AL-TD-008 | Telegram Channel Adapter and progress throttling | Not started | None | Implement Telegram inbound/outbound, idempotency key mapping, and progress delivery policy. |
 | AL-TD-009 | `run_event` / artifact / error taxonomy | Partial | `al_run_event`, `al_artifact`; in-memory progress events; snake_case run-event DTOs | Artifact upload, error taxonomy, retention/replay policy, and separate system/audit event stream remain. |
 
@@ -46,7 +46,7 @@ This document maps the reviewed M1 technical-design tasks (`AL-TD-*`) to the rep
 
 1. Run live PostgreSQL DSN smoke and add real concurrent pull / renew / unique violation tests for the new `AGENTLINK_STORAGE=postgres` mode.
 2. Finish AL-TD-003 remaining grant/report polish only if needed before runner integration.
-3. Implement AL-TD-007 Codex Runner Adapter.
+3. Wire the AL-TD-007 Codex Runner Adapter into a minimal long-running agentlet daemon loop on claw-tenc.
 4. Implement AL-TD-008 Telegram adapter and then run the first real end-to-end M1 loop.
 5. Add retention cleanup / observability for pending and acknowledged control actions after the real agentlet starts consuming them.
 
@@ -133,3 +133,12 @@ This document maps the reviewed M1 technical-design tasks (`AL-TD-*`) to the rep
 - Wired the same semantics through in-memory mode, PostgreSQL statement contracts, repository adapter, PostgreSQL-backed control plane, and HTTP DTOs.
 - Added unit / HTTP / repository / SQL contract tests. Test count increased to 84.
 - Remaining gaps are richer grant update/audit surfaces, runner capability report refresh, live DSN validation, real agentlet consumption, Codex Runner Adapter, and Telegram Adapter.
+
+
+## 2026-06-12 AL-TD-007 Codex Runner Adapter skeleton update
+
+- Added `src/agentlet/runner.ts` as the agentlet-side local runner contract. It defines `RunnerAdapter`, `RunnerRunInput`, `RunnerEvent`, `RunnerResult`, and a helper to convert runner events into agentlet progress payloads.
+- Added `src/agentlet/codex-runner.ts` with a minimal Codex CLI adapter skeleton. The adapter builds current-CLI-compatible `codex --ask-for-approval <policy> exec --json --cd <workspace>` commands, enforces absolute workspace paths under configured allowed roots, passes only allowlisted local environment variables plus explicit local overrides, and supports `AbortSignal` / timeout boundaries.
+- Runner progress sequence is local to the agentlet progress stream: lifecycle, stdout, stderr, error, and final events are emitted with monotonically increasing `seq`; control-plane system/audit events remain separate.
+- Added fake command-runner tests for command construction, workspace validation, env allowlist, stdout/stderr progress mapping, successful completion, non-zero failure, and external cancel. Tests do not invoke a real Codex CLI.
+- README now lists the Codex Runner Adapter as a skeleton, not as a deployable daemon. Remaining gaps are real agentlet daemon wiring, real Codex CLI device smoke, process cleanup hardening, Telegram Adapter, and end-to-end M1 validation.

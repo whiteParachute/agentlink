@@ -42,13 +42,14 @@ Agentlink 仍处于 M1 开发阶段，当前仓库已经包含：
 - 静态 capability grant / workdir grant 派发前校验，以及最小 grant 管理 API；
 - agentlet `pull` / `ack` / `lease/renew` / `control/poll` / `control/ack` / `recover` / `recover/decision` / `progress` / `complete` 的协议骨架；
 - device revoke cascade：吊销设备 token，并取消该设备当前 active lease / in-flight run；
+- agentlet 侧 RunnerAdapter 本地执行契约，以及 Codex CLI Adapter 的最小骨架（命令构造、workspace 边界、stdout/stderr progress 映射、cancel/timeout 边界）；
 - GitHub Actions CI 和 Node 内置测试。
 
 还未包含：
 
 - CI 中固定运行的真实 PostgreSQL DSN 环境和更完整的故障注入 / 并发压力测试；
-- 常驻 agentlet daemon；
-- Codex Runner Adapter；
+- 常驻 agentlet daemon，以及把 control-plane pull/ack/renew/progress/complete 串到本地 runner 的消费循环；
+- Codex Runner Adapter 的真实设备侧 smoke / 长任务恢复 / 进程清理验证；
 - Telegram Adapter；
 - 生产部署配置和端到端 E2E。
 
@@ -120,7 +121,7 @@ npm audit --omit=dev
 
 ## 设计边界
 
-M1 只做 personal domain 的最小闭环，不接管所有个人设备，也不接入 work domain。当前优先级是让 `claw-tenc + Codex CLI` 跑通稳定闭环，再逐步接入 Telegram、更多 runner 和更多设备。
+M1 只做 personal domain 的最小闭环，不接管所有个人设备，也不接入 work domain。当前优先级是让 `claw-tenc + Codex CLI` 跑通稳定闭环，再逐步接入 Telegram、更多 runner 和更多设备。Codex CLI Adapter 当前只是可测试骨架，凭据仍留在设备本地环境中，控制面和数据库不保存 runner 凭据。
 
 ## License
 
