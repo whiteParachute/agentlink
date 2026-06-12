@@ -5,7 +5,7 @@ import { InMemoryControlPlane, type CreateTaskInput, type RegisterDeviceInput } 
 import { PostgresControlPlane } from './control-plane/postgres.js';
 import type { AgentlinkControlPlanePort } from './control-plane/port.js';
 import { PgRuntime } from './db/pg-client.js';
-import type { DeviceRecord, JsonRecord, RunRecord, RunnerRecord, TaskRecord } from './domain/entities.js';
+import type { CapabilityGrantRecord, DeviceRecord, JsonRecord, RunRecord, RunnerRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
 import type { RunStatus } from './domain/status.js';
 import { sendJson } from './http/json.js';
 
@@ -78,6 +78,8 @@ async function handleRequest(
       capabilities: [
         'task-api',
         'device-register',
+        'device-grant-management',
+        'device-revoke',
         'agentlet-pull',
         'agentlet-lease-renew',
         'agentlet-control',
@@ -170,6 +172,68 @@ async function handleRequest(
       device_secret: result.deviceSecret,
       device: toDeviceDto(result.device),
       runner: toRunnerDto(result.runner),
+    });
+    return;
+  }
+
+  const capabilityGrantsMatch = /^\/api\/v1\/devices\/([^/]+)\/capability-grants$/.exec(url.pathname);
+  if (capabilityGrantsMatch && req.method === 'GET') {
+    const grants = await controlPlane.listCapabilityGrants(capabilityGrantsMatch[1] ?? '');
+    sendJson(res, 200, { capability_grants: grants.map(toCapabilityGrantDto) });
+    return;
+  }
+  if (capabilityGrantsMatch && req.method === 'POST') {
+    const body = await readJsonRecord(req);
+    const grant = await controlPlane.grantCapability({
+      deviceId: capabilityGrantsMatch[1] ?? '',
+      runnerId: requireString(body, 'runner_id'),
+      capability: requireString(body, 'capability'),
+      grantedBy: optionalString(body, 'granted_by') ?? 'api',
+    });
+    sendJson(res, 201, { capability_grant: toCapabilityGrantDto(grant) });
+    return;
+  }
+
+  const capabilityGrantRevokeMatch = /^\/api\/v1\/capability-grants\/([^/]+)\/revoke$/.exec(url.pathname);
+  if (capabilityGrantRevokeMatch && req.method === 'POST') {
+    const grant = await controlPlane.revokeCapabilityGrant(capabilityGrantRevokeMatch[1] ?? '');
+    sendJson(res, 200, { capability_grant: toCapabilityGrantDto(grant) });
+    return;
+  }
+
+  const workdirGrantsMatch = /^\/api\/v1\/devices\/([^/]+)\/workdir-grants$/.exec(url.pathname);
+  if (workdirGrantsMatch && req.method === 'GET') {
+    const grants = await controlPlane.listWorkdirGrants(workdirGrantsMatch[1] ?? '');
+    sendJson(res, 200, { workdir_grants: grants.map(toWorkdirGrantDto) });
+    return;
+  }
+  if (workdirGrantsMatch && req.method === 'POST') {
+    const body = await readJsonRecord(req);
+    const grant = await controlPlane.grantWorkdir({
+      deviceId: workdirGrantsMatch[1] ?? '',
+      pathPrefix: requireString(body, 'path_prefix'),
+      accessMode: optionalAccessMode(body, 'access_mode') ?? 'read_write',
+    });
+    sendJson(res, 201, { workdir_grant: toWorkdirGrantDto(grant) });
+    return;
+  }
+
+  const workdirGrantRevokeMatch = /^\/api\/v1\/workdir-grants\/([^/]+)\/revoke$/.exec(url.pathname);
+  if (workdirGrantRevokeMatch && req.method === 'POST') {
+    const grant = await controlPlane.revokeWorkdirGrant(workdirGrantRevokeMatch[1] ?? '');
+    sendJson(res, 200, { workdir_grant: toWorkdirGrantDto(grant) });
+    return;
+  }
+
+  const deviceRevokeMatch = /^\/api\/v1\/devices\/([^/]+)\/revoke$/.exec(url.pathname);
+  if (deviceRevokeMatch && req.method === 'POST') {
+    const body = await readJsonRecord(req);
+    const result = await controlPlane.revokeDevice(deviceRevokeMatch[1] ?? '', optionalString(body, 'reason'));
+    sendJson(res, 200, {
+      device: toDeviceDto(result.device),
+      tasks: result.tasks.map(toTaskDto),
+      runs: result.runs.map(toRunDto),
+      leases: result.leases.map(toLeaseDto),
     });
     return;
   }
@@ -446,8 +510,35 @@ function toDeviceDto(device: DeviceRecord) {
     status: device.status,
     agentlet_version: device.agentletVersion,
     last_heartbeat_at: device.lastHeartbeatAt,
+    revoked_at: device.revokedAt,
     created_at: device.createdAt,
     updated_at: device.updatedAt,
+  };
+}
+
+function toCapabilityGrantDto(grant: CapabilityGrantRecord) {
+  return {
+    id: grant.id,
+    domain: grant.domain,
+    device_id: grant.deviceId,
+    runner_id: grant.runnerId,
+    capability: grant.capability,
+    grant_status: grant.grantStatus,
+    granted_by: grant.grantedBy,
+    granted_at: grant.grantedAt,
+    revoked_at: grant.revokedAt,
+  };
+}
+
+function toWorkdirGrantDto(grant: WorkdirGrantRecord) {
+  return {
+    id: grant.id,
+    domain: grant.domain,
+    device_id: grant.deviceId,
+    path_prefix: grant.pathPrefix,
+    access_mode: grant.accessMode,
+    created_at: grant.createdAt,
+    revoked_at: grant.revokedAt,
   };
 }
 
@@ -538,6 +629,13 @@ function optionalInteger(body: JsonRecord, key: string): number | undefined {
   if (value === undefined) return undefined;
   if (!Number.isInteger(value)) throw new AgentlinkError(400, 'AL_BAD_REQUEST', `${key} must be an integer`);
   return value as number;
+}
+
+function optionalAccessMode(body: JsonRecord, key: string): WorkdirAccessMode | undefined {
+  const value = body[key];
+  if (value === undefined) return undefined;
+  if (value === 'read' || value === 'write' || value === 'read_write') return value;
+  throw new AgentlinkError(400, 'AL_BAD_REQUEST', `${key} must be read, write, or read_write`);
 }
 
 function optionalRecord(body: JsonRecord, key: string): JsonRecord | undefined {

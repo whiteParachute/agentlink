@@ -1,4 +1,16 @@
-import type { ControlActionRecord, DeviceRecord, LeaseRecord, RecoverDecision, RecoverableRunRecord, RunEventRecord, RunRecord, TaskRecord } from '../domain/entities.js';
+import type {
+  CapabilityGrantRecord,
+  ControlActionRecord,
+  DeviceRecord,
+  LeaseRecord,
+  RecoverDecision,
+  RecoverableRunRecord,
+  RunEventRecord,
+  RunRecord,
+  TaskRecord,
+  WorkdirAccessMode,
+  WorkdirGrantRecord,
+} from '../domain/entities.js';
 import type {
   AgentletInstruction,
   CreateTaskInput,
@@ -17,6 +29,13 @@ export interface AgentlinkControlPlanePort {
   getLease(leaseId: string): MaybePromise<LeaseRecord | undefined>;
   getRunEvents(runId: string, afterSeq?: number): MaybePromise<RunEventRecord[]>;
   registerDevice(input: RegisterDeviceInput): MaybePromise<RegisterDeviceResult>;
+  listCapabilityGrants(deviceId: string): MaybePromise<CapabilityGrantRecord[]>;
+  grantCapability(input: { deviceId: string; runnerId: string; capability: string; grantedBy: string }): MaybePromise<CapabilityGrantRecord>;
+  revokeCapabilityGrant(grantId: string): MaybePromise<CapabilityGrantRecord>;
+  listWorkdirGrants(deviceId: string): MaybePromise<WorkdirGrantRecord[]>;
+  grantWorkdir(input: { deviceId: string; pathPrefix: string; accessMode?: WorkdirAccessMode }): MaybePromise<WorkdirGrantRecord>;
+  revokeWorkdirGrant(grantId: string): MaybePromise<WorkdirGrantRecord>;
+  revokeDevice(deviceId: string, reason?: string): MaybePromise<{ device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] }>;
   heartbeat(deviceId: string, deviceSecret: string): MaybePromise<DeviceRecord>;
   authenticateDevice(deviceId: string, deviceSecret: string): MaybePromise<DeviceRecord>;
   pull(input: PullInput): MaybePromise<AgentletInstruction | undefined>;

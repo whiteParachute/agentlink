@@ -39,8 +39,9 @@ Agentlink 仍处于 M1 开发阶段，当前仓库已经包含：
 - PostgreSQL schema、SQL contract、repository adapter 和 `pg` runtime adapter；
 - 可选 PostgreSQL-backed server mode：`AGENTLINK_STORAGE=postgres`；
 - `db:smoke` 在真实 PostgreSQL DSN 下会创建临时 schema，验证 migration、active lease 唯一约束、并发 skip locked、renew/recover/control action 等关键合同；
-- 静态 capability grant / workdir grant 派发前校验；
+- 静态 capability grant / workdir grant 派发前校验，以及最小 grant 管理 API；
 - agentlet `pull` / `ack` / `lease/renew` / `control/poll` / `control/ack` / `recover` / `recover/decision` / `progress` / `complete` 的协议骨架；
+- device revoke cascade：吊销设备 token，并取消该设备当前 active lease / in-flight run；
 - GitHub Actions CI 和 Node 内置测试。
 
 还未包含：
@@ -68,6 +69,14 @@ npm start
 - `GET /healthz`
 - `GET /readyz`
 - `GET /api/v1/meta`
+
+M1 控制面当前还包含最小设备管理接口：
+
+- `GET/POST /api/v1/devices/:device_id/capability-grants`
+- `POST /api/v1/capability-grants/:grant_id/revoke`
+- `GET/POST /api/v1/devices/:device_id/workdir-grants`
+- `POST /api/v1/workdir-grants/:grant_id/revoke`
+- `POST /api/v1/devices/:device_id/revoke`
 
 ## PostgreSQL
 

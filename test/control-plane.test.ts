@@ -81,6 +81,53 @@ test('policy evaluation denies missing capability and workdir grants before leas
   assert.equal(noWorkdirGrant.getPolicyDecisions(workdirDeniedTask.run.id).at(-1)?.reason?.includes('workdir grants'), true);
 });
 
+test('grant management can add and revoke capability and workdir grants', () => {
+  const controlPlane = new InMemoryControlPlane({ now: () => new Date('2026-06-11T00:00:00.000Z') });
+  const registered = controlPlane.registerDevice({ displayName: 'claw-tenc', ownerUserId: 'whiteParachute' });
+  controlPlane.heartbeat(registered.device.id, registered.deviceSecret);
+  controlPlane.createTask(
+    { source: 'telegram', sourceRef: 'telegram:grant-management', payload: { text: 'grant me' } },
+    'idem-grant-management',
+  );
+
+  assert.throws(
+    () => controlPlane.pull({ deviceId: registered.device.id, runnerId: registered.runner.id }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_CAPABILITY_DENIED',
+  );
+
+  const capabilityGrant = controlPlane.grantCapability({
+    deviceId: registered.device.id,
+    runnerId: registered.runner.id,
+    capability: 'codex:exec',
+    grantedBy: 'test',
+  });
+  assert.equal(capabilityGrant.grantStatus, 'GRANTED');
+  assert.deepEqual(controlPlane.listCapabilityGrants(registered.device.id).map((grant) => grant.id), [capabilityGrant.id]);
+
+  assert.throws(
+    () => controlPlane.pull({ deviceId: registered.device.id, runnerId: registered.runner.id }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_WORKDIR_DENIED',
+  );
+
+  const workdirGrant = controlPlane.grantWorkdir({ deviceId: registered.device.id, pathPrefix: DEFAULT_WORKSPACE, accessMode: 'read_write' });
+  assert.equal(workdirGrant.accessMode, 'read_write');
+  assert.deepEqual(controlPlane.listWorkdirGrants(registered.device.id).map((grant) => grant.id), [workdirGrant.id]);
+
+  assert.ok(controlPlane.pull({ deviceId: registered.device.id, runnerId: registered.runner.id }));
+
+  assert.equal(controlPlane.revokeCapabilityGrant(capabilityGrant.id).grantStatus, 'REVOKED');
+  assert.equal(typeof controlPlane.revokeWorkdirGrant(workdirGrant.id).revokedAt, 'string');
+
+  controlPlane.createTask(
+    { source: 'telegram', sourceRef: 'telegram:grant-management-after-revoke', payload: { text: 'should deny' } },
+    'idem-grant-management-after-revoke',
+  );
+  assert.throws(
+    () => controlPlane.pull({ deviceId: registered.device.id, runnerId: registered.runner.id }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_CAPABILITY_DENIED',
+  );
+});
+
 test('policy evaluation denies network_scope mismatches', () => {
   const controlPlane = new InMemoryControlPlane({ now: () => new Date('2026-06-11T00:00:00.000Z') });
   const registered = controlPlane.registerDevice({
@@ -276,6 +323,28 @@ test('task cancel emits a cancel_run control action and removes it from recovery
   const acked = controlPlane.ackControlAction(registered.device.id, cancelled.controlActions[0]?.id ?? '');
   assert.equal(acked.controlAction.status, 'ACKED');
   assert.deepEqual(controlPlane.pollControl(registered.device.id).controlActions, []);
+  assert.deepEqual(controlPlane.recoverDevice(registered.device.id).recoverableRuns, []);
+});
+
+test('device revoke cancels active work and blocks future agentlet auth', () => {
+  const { controlPlane, registered } = bootstrap();
+  const instruction = controlPlane.pull({ deviceId: registered.device.id, runnerId: registered.runner.id });
+  assert.ok(instruction);
+  controlPlane.ackLease(instruction.leaseId, true);
+
+  const revoked = controlPlane.revokeDevice(registered.device.id, 'operator_revoked');
+  assert.equal(revoked.device.status, 'REVOKED');
+  assert.equal(typeof revoked.device.revokedAt, 'string');
+  assert.equal(revoked.leases.length, 1);
+  assert.equal(revoked.leases[0]?.status, 'CANCELLED');
+  assert.equal(revoked.leases[0]?.expireReason, 'operator_revoked');
+  assert.equal(revoked.runs[0]?.status, 'CANCELLED');
+  assert.equal(revoked.tasks[0]?.status, 'CANCELLED');
+
+  assert.throws(
+    () => controlPlane.authenticateDevice(registered.device.id, registered.deviceSecret),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_TOKEN_REVOKED',
+  );
   assert.deepEqual(controlPlane.recoverDevice(registered.device.id).recoverableRuns, []);
 });
 

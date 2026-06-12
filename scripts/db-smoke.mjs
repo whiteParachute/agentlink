@@ -103,20 +103,22 @@ BEGIN
     SELECT 1
     FROM pg_indexes
     WHERE schemaname = '${schemaName}'
-      AND indexname = 'idx_al_capability_grant_active_runner'
+      AND indexname = 'uq_al_capability_grant_active_runner'
       AND indexdef LIKE '%revoked_at IS NULL%'
+      AND indexdef LIKE 'CREATE UNIQUE INDEX%'
   ) THEN
-    RAISE EXCEPTION 'missing active capability grant lookup index in schema ${schemaName}';
+    RAISE EXCEPTION 'missing active capability grant unique index in schema ${schemaName}';
   END IF;
 
   IF NOT EXISTS (
     SELECT 1
     FROM pg_indexes
     WHERE schemaname = '${schemaName}'
-      AND indexname = 'idx_al_workdir_grant_active_device'
+      AND indexname = 'uq_al_workdir_grant_active_device'
       AND indexdef LIKE '%revoked_at IS NULL%'
+      AND indexdef LIKE 'CREATE UNIQUE INDEX%'
   ) THEN
-    RAISE EXCEPTION 'missing active workdir grant lookup index in schema ${schemaName}';
+    RAISE EXCEPTION 'missing active workdir grant unique index in schema ${schemaName}';
   END IF;
 
   IF NOT EXISTS (

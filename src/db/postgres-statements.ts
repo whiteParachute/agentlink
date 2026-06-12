@@ -190,6 +190,9 @@ INSERT INTO al_capability_grant (
   $6,
   $7
 )
+ON CONFLICT (domain, device_id, runner_id, capability)
+WHERE grant_status = 'GRANTED' AND revoked_at IS NULL
+DO UPDATE SET granted_at = al_capability_grant.granted_at
 RETURNING *;
 `,
 
@@ -209,6 +212,9 @@ INSERT INTO al_workdir_grant (
   $5,
   $6
 )
+ON CONFLICT (domain, device_id, path_prefix, access_mode)
+WHERE revoked_at IS NULL
+DO UPDATE SET created_at = al_workdir_grant.created_at
 RETURNING *;
 `,
 
@@ -359,6 +365,21 @@ WHERE domain = $1
   AND revoked_at IS NULL;
 `,
 
+  listCapabilityGrantsForDevice: `
+SELECT *
+FROM al_capability_grant
+WHERE device_id = $1
+ORDER BY granted_at ASC, id ASC;
+`,
+
+  revokeCapabilityGrant: `
+UPDATE al_capability_grant
+SET grant_status = 'REVOKED',
+    revoked_at = COALESCE(revoked_at, $2)
+WHERE id = $1
+RETURNING *;
+`,
+
   findActiveWorkdirGrantsForDevice: `
 SELECT *
 FROM al_workdir_grant
@@ -366,6 +387,20 @@ WHERE domain = $1
   AND device_id = $2
   AND revoked_at IS NULL
 ORDER BY length(path_prefix) DESC;
+`,
+
+  listWorkdirGrantsForDevice: `
+SELECT *
+FROM al_workdir_grant
+WHERE device_id = $1
+ORDER BY created_at ASC, id ASC;
+`,
+
+  revokeWorkdirGrant: `
+UPDATE al_workdir_grant
+SET revoked_at = COALESCE(revoked_at, $2)
+WHERE id = $1
+RETURNING *;
 `,
 
   insertPolicyDecision: `
@@ -393,6 +428,53 @@ INSERT INTO al_policy_decision (
   $10
 )
 RETURNING *;
+`,
+
+  revokeDevice: `
+UPDATE al_device
+SET status = 'REVOKED',
+    revoked_at = COALESCE(revoked_at, $2),
+    updated_at = $2
+WHERE id = $1
+RETURNING *;
+`,
+
+  cancelActiveLeasesForDevice: `
+WITH target AS (
+  SELECT r.id AS run_id, r.task_id, l.id AS lease_id
+  FROM al_run_lease l
+  JOIN al_run r ON r.id = l.run_id
+  JOIN al_task t ON t.id = r.task_id AND t.current_run_id = r.id
+  WHERE l.device_id = $1
+    AND l.status IN ${ACTIVE_LEASE_STATUSES_SQL}
+    AND r.current_lease_id = l.id
+    AND r.status IN ('LEASED', 'RUNNING')
+    AND t.status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')
+  FOR UPDATE OF r, l, t
+), updated_lease AS (
+  UPDATE al_run_lease l
+  SET status = 'CANCELLED', cancelled_at = $2, expire_reason = $3, updated_at = $2, version = l.version + 1
+  FROM target
+  WHERE l.id = target.lease_id
+  RETURNING l.*
+), updated_run AS (
+  UPDATE al_run r
+  SET status = 'CANCELLED', finished_at = $2, updated_at = $2, version = r.version + 1
+  FROM target
+  WHERE r.id = target.run_id
+  RETURNING r.*
+), updated_task AS (
+  UPDATE al_task t
+  SET status = 'CANCELLED', updated_at = $2
+  FROM updated_run r
+  WHERE t.id = r.task_id
+    AND t.current_run_id = r.id
+  RETURNING t.*
+)
+SELECT row_to_json(l) AS lease, row_to_json(r) AS run, row_to_json(t) AS task
+FROM updated_lease l
+JOIN updated_run r ON r.id = l.run_id
+JOIN updated_task t ON t.id = r.task_id;
 `,
 
   ackLeaseAccepted: `

@@ -382,9 +382,76 @@ export class PostgreSqlRepository {
     return result.rows.map(mapCapabilityGrant);
   }
 
+  async listCapabilityGrants(deviceId: string): Promise<CapabilityGrantRecord[]> {
+    await this.mustGetDevice(deviceId);
+    const result = await this.client.query<Record<string, unknown>>(PostgreSqlStatements.listCapabilityGrantsForDevice, [deviceId]);
+    return result.rows.map(mapCapabilityGrant);
+  }
+
+  async grantCapability(input: { deviceId: string; runnerId: string; capability: string; grantedBy: string }): Promise<CapabilityGrantRecord> {
+    const device = await this.mustGetDevice(input.deviceId);
+    if (device.status === 'REVOKED') throw new AgentlinkError(409, 'AL_STATE_CONFLICT', 'Cannot grant capabilities to a revoked device');
+    const runner = await this.getRunner(input.runnerId);
+    if (!runner) throw new AgentlinkError(404, 'AL_RUNNER_NOT_FOUND', 'Runner not found');
+    if (runner.deviceId !== device.id) throw new AgentlinkError(403, 'AL_POLICY_DENIED', 'Runner does not belong to device');
+    if (!runner.capabilities.includes(input.capability)) {
+      throw new AgentlinkError(403, 'AL_CAPABILITY_DENIED', 'Capability must be declared before it can be granted');
+    }
+    const existing = await this.findActiveCapabilityGrantsForRunner(device.domain, device.id, runner.id, [input.capability]);
+    if (existing[0]) return existing[0];
+    const result = await this.client.query<Record<string, unknown>>(PostgreSqlStatements.insertCapabilityGrant, [
+      randomUUID(),
+      device.domain,
+      device.id,
+      runner.id,
+      input.capability,
+      input.grantedBy,
+      this.timestamp(),
+    ]);
+    return mapCapabilityGrant(requireSingleRow(result, 'AL_INTERNAL', 'Capability grant insert returned no row'));
+  }
+
+  async revokeCapabilityGrant(grantId: string): Promise<CapabilityGrantRecord> {
+    const result = await this.client.query<Record<string, unknown>>(PostgreSqlStatements.revokeCapabilityGrant, [grantId, this.timestamp()]);
+    if (result.rowCount === 0) throw new AgentlinkError(404, 'AL_CAPABILITY_GRANT_NOT_FOUND', 'Capability grant not found');
+    return mapCapabilityGrant(requireSingleRow(result, 'AL_INTERNAL', 'Capability grant revoke returned no row'));
+  }
+
   async findActiveWorkdirGrantsForDevice(domain: Domain, deviceId: string): Promise<WorkdirGrantRecord[]> {
     const result = await this.client.query<Record<string, unknown>>(PostgreSqlStatements.findActiveWorkdirGrantsForDevice, [domain, deviceId]);
     return result.rows.map(mapWorkdirGrant);
+  }
+
+  async listWorkdirGrants(deviceId: string): Promise<WorkdirGrantRecord[]> {
+    await this.mustGetDevice(deviceId);
+    const result = await this.client.query<Record<string, unknown>>(PostgreSqlStatements.listWorkdirGrantsForDevice, [deviceId]);
+    return result.rows.map(mapWorkdirGrant);
+  }
+
+  async grantWorkdir(input: { deviceId: string; pathPrefix: string; accessMode?: WorkdirAccessMode }): Promise<WorkdirGrantRecord> {
+    const device = await this.mustGetDevice(input.deviceId);
+    if (device.status === 'REVOKED') throw new AgentlinkError(409, 'AL_STATE_CONFLICT', 'Cannot grant workdirs to a revoked device');
+    if (!input.pathPrefix.startsWith('/')) throw new AgentlinkError(403, 'AL_WORKDIR_DENIED', 'Workdir grant path_prefix must be absolute');
+    const accessMode = input.accessMode ?? 'read_write';
+    const existing = (await this.findActiveWorkdirGrantsForDevice(device.domain, device.id)).find(
+      (grant) => grant.pathPrefix === input.pathPrefix && grant.accessMode === accessMode,
+    );
+    if (existing) return existing;
+    const result = await this.client.query<Record<string, unknown>>(PostgreSqlStatements.insertWorkdirGrant, [
+      randomUUID(),
+      device.domain,
+      device.id,
+      input.pathPrefix,
+      accessMode,
+      this.timestamp(),
+    ]);
+    return mapWorkdirGrant(requireSingleRow(result, 'AL_INTERNAL', 'Workdir grant insert returned no row'));
+  }
+
+  async revokeWorkdirGrant(grantId: string): Promise<WorkdirGrantRecord> {
+    const result = await this.client.query<Record<string, unknown>>(PostgreSqlStatements.revokeWorkdirGrant, [grantId, this.timestamp()]);
+    if (result.rowCount === 0) throw new AgentlinkError(404, 'AL_WORKDIR_GRANT_NOT_FOUND', 'Workdir grant not found');
+    return mapWorkdirGrant(requireSingleRow(result, 'AL_INTERNAL', 'Workdir grant revoke returned no row'));
   }
 
   async insertPolicyDecision(input: {
@@ -535,6 +602,29 @@ export class PostgreSqlRepository {
     return mapped;
   }
 
+  async revokeDevice(deviceId: string, reason = 'device_revoked'): Promise<{ device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] }> {
+    return await withTransaction(this.client, async (tx) => {
+      const now = this.timestamp();
+      const deviceResult = await tx.query<EnvelopeRow>(PostgreSqlStatements.revokeDevice, [deviceId, now]);
+      if (deviceResult.rowCount === 0) throw new AgentlinkError(404, 'AL_DEVICE_NOT_FOUND', 'Device not found');
+      const cancelled = await tx.query<EnvelopeRow>(PostgreSqlStatements.cancelActiveLeasesForDevice, [deviceId, now, reason]);
+      const tasks: TaskRecord[] = [];
+      const runs: RunRecord[] = [];
+      const leases: LeaseRecord[] = [];
+      for (const row of cancelled.rows) {
+        if (row.task) tasks.push(mapTask(row.task));
+        if (row.run) runs.push(mapRun(row.run));
+        if (row.lease) leases.push(mapLease(row.lease));
+      }
+      return {
+        device: mapDevice(requireSingleRow(deviceResult, 'AL_INTERNAL', 'Device revoke returned no row').device),
+        tasks,
+        runs,
+        leases,
+      };
+    });
+  }
+
   async listControlActionsForDevice(deviceId: string, limit = 50): Promise<ControlActionRecord[]> {
     const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.listControlActionsForDevice, [deviceId, limit]);
     return result.rows.map((row) => mapControlAction(row.control_action));
@@ -617,6 +707,12 @@ export class PostgreSqlRepository {
 
   private timestamp(): string {
     return this.now().toISOString();
+  }
+
+  private async mustGetDevice(deviceId: string): Promise<DeviceRecord> {
+    const device = await this.getDevice(deviceId);
+    if (!device) throw new AgentlinkError(404, 'AL_DEVICE_NOT_FOUND', 'Device not found');
+    return device;
   }
 }
 

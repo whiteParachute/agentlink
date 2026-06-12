@@ -258,6 +258,70 @@ test('PostgreSqlRepository registers devices with declared capabilities and gran
   ]);
 });
 
+test('PostgreSqlRepository manages capability and workdir grants', async () => {
+  const client = new ScriptedSqlClient();
+  client.enqueue(one({ device: deviceRow() }));
+  client.enqueue(one({ runner: runnerRow() }));
+  client.enqueue(none());
+  client.enqueue(one(capabilityGrantRow({ granted_by: 'operator' })));
+  client.enqueue(one({ device: deviceRow() }));
+  client.enqueue(none());
+  client.enqueue(one(workdirGrantRow()));
+  client.enqueue(one(capabilityGrantRow({ grant_status: 'REVOKED', revoked_at: NOW })));
+  client.enqueue(one(workdirGrantRow({ revoked_at: NOW })));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const capability = await repo.grantCapability({
+    deviceId: '00000000-0000-4000-8000-000000000301',
+    runnerId: '00000000-0000-4000-8000-000000000401',
+    capability: 'codex:exec',
+    grantedBy: 'operator',
+  });
+  assert.equal(capability.grantedBy, 'operator');
+
+  const workdir = await repo.grantWorkdir({
+    deviceId: '00000000-0000-4000-8000-000000000301',
+    pathPrefix: process.cwd(),
+    accessMode: 'read_write',
+  });
+  assert.equal(workdir.pathPrefix, process.cwd());
+
+  assert.equal((await repo.revokeCapabilityGrant(capability.id)).grantStatus, 'REVOKED');
+  assert.equal((await repo.revokeWorkdirGrant(workdir.id)).revokedAt, NOW);
+
+  assert.deepEqual(client.calls.map((call) => call.sql), [
+    PostgreSqlStatements.findDeviceById,
+    PostgreSqlStatements.findRunnerById,
+    PostgreSqlStatements.findActiveCapabilityGrantsForRunner,
+    PostgreSqlStatements.insertCapabilityGrant,
+    PostgreSqlStatements.findDeviceById,
+    PostgreSqlStatements.findActiveWorkdirGrantsForDevice,
+    PostgreSqlStatements.insertWorkdirGrant,
+    PostgreSqlStatements.revokeCapabilityGrant,
+    PostgreSqlStatements.revokeWorkdirGrant,
+  ]);
+});
+
+test('PostgreSqlRepository revokes a device and cascades current active work', async () => {
+  const client = new ScriptedSqlClient();
+  client.enqueue(one({ device: deviceRow({ status: 'REVOKED', revoked_at: NOW }) }));
+  client.enqueue(one({
+    task: taskRow({ status: 'CANCELLED' }),
+    run: runRow({ status: 'CANCELLED', current_lease_id: '00000000-0000-4000-8000-000000000201' }),
+    lease: leaseRow({ status: 'CANCELLED', cancelled_at: NOW, expire_reason: 'operator_revoked' }),
+  }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const revoked = await repo.revokeDevice('00000000-0000-4000-8000-000000000301', 'operator_revoked');
+
+  assert.equal(revoked.device.status, 'REVOKED');
+  assert.equal(revoked.leases[0]?.status, 'CANCELLED');
+  assert.equal(revoked.leases[0]?.expireReason, 'operator_revoked');
+  assert.equal(revoked.runs[0]?.status, 'CANCELLED');
+  assert.equal(revoked.tasks[0]?.status, 'CANCELLED');
+  assert.deepEqual(client.calls.map((call) => call.sql), ['BEGIN', PostgreSqlStatements.revokeDevice, PostgreSqlStatements.cancelActiveLeasesForDevice, 'COMMIT']);
+});
+
 test('PostgreSqlRepository authenticates and heartbeats devices via token hash', async () => {
   const secret = 'al_dev_test';
   const client = new ScriptedSqlClient();

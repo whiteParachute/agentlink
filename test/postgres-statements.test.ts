@@ -49,7 +49,11 @@ test('device runtime statements register, authenticate, and heartbeat devices wi
   assert.match(PostgreSqlStatements.insertRunner, /INSERT INTO al_runner/i);
   assert.match(PostgreSqlStatements.insertCapabilityDeclared, /ON CONFLICT \(device_id, runner_id, name, scope\)/i);
   assert.match(PostgreSqlStatements.insertCapabilityGrant, /grant_status/i);
+  assert.match(PostgreSqlStatements.insertCapabilityGrant, /ON CONFLICT \(domain, device_id, runner_id, capability\)/i);
+  assert.match(PostgreSqlStatements.insertCapabilityGrant, /WHERE grant_status = 'GRANTED' AND revoked_at IS NULL/i);
   assert.match(PostgreSqlStatements.insertWorkdirGrant, /path_prefix/i);
+  assert.match(PostgreSqlStatements.insertWorkdirGrant, /ON CONFLICT \(domain, device_id, path_prefix, access_mode\)/i);
+  assert.match(PostgreSqlStatements.insertWorkdirGrant, /WHERE revoked_at IS NULL/i);
   assert.match(PostgreSqlStatements.findDeviceById, /WHERE d\.id = \$1/i);
   assert.match(PostgreSqlStatements.findRunnerById, /json_agg\(cd\.name ORDER BY cd\.name\)/i);
   assert.match(PostgreSqlStatements.heartbeatDevice, /status = 'ONLINE'/i);
@@ -73,6 +77,35 @@ test('policy grant statements look up only active grants and persist policy deci
   assert.match(PostgreSqlStatements.insertPolicyDecision, /INSERT INTO al_policy_decision/i);
   assert.match(PostgreSqlStatements.insertPolicyDecision, /decision/i);
   assert.match(PostgreSqlStatements.insertPolicyDecision, /RETURNING \*/i);
+});
+
+test('grant management statements list and revoke grants explicitly', () => {
+  assert.match(PostgreSqlStatements.listCapabilityGrantsForDevice, /FROM al_capability_grant/i);
+  assert.match(PostgreSqlStatements.listCapabilityGrantsForDevice, /WHERE device_id = \$1/i);
+  assert.match(PostgreSqlStatements.revokeCapabilityGrant, /SET grant_status = 'REVOKED'/i);
+  assert.match(PostgreSqlStatements.revokeCapabilityGrant, /revoked_at = COALESCE\(revoked_at, \$2\)/i);
+  assert.match(PostgreSqlStatements.revokeCapabilityGrant, /WHERE id = \$1/i);
+
+  assert.match(PostgreSqlStatements.listWorkdirGrantsForDevice, /FROM al_workdir_grant/i);
+  assert.match(PostgreSqlStatements.listWorkdirGrantsForDevice, /WHERE device_id = \$1/i);
+  assert.match(PostgreSqlStatements.revokeWorkdirGrant, /SET revoked_at = COALESCE\(revoked_at, \$2\)/i);
+  assert.match(PostgreSqlStatements.revokeWorkdirGrant, /WHERE id = \$1/i);
+});
+
+test('device revoke statements revoke tokens and cancel only current active work', () => {
+  assert.match(PostgreSqlStatements.revokeDevice, /SET status = 'REVOKED'/i);
+  assert.match(PostgreSqlStatements.revokeDevice, /revoked_at = COALESCE\(revoked_at, \$2\)/i);
+  assert.match(PostgreSqlStatements.revokeDevice, /WHERE id = \$1/i);
+
+  const sql = getPostgreSqlStatement('cancelActiveLeasesForDevice');
+  assert.match(sql, /l\.device_id = \$1/i);
+  assert.match(sql, /l\.status IN \('ISSUED', 'ACKED', 'RENEWED'\)/i);
+  assert.match(sql, /r\.current_lease_id = l\.id/i);
+  assert.match(sql, /r\.status IN \('LEASED', 'RUNNING'\)/i);
+  assert.match(sql, /t\.current_run_id = r\.id/i);
+  assert.match(sql, /FOR UPDATE OF r, l, t/i);
+  assert.match(sql, /SET status = 'CANCELLED'/i);
+  assert.match(sql, /expire_reason = \$3/i);
 });
 
 test('ack statements require the lease state that the protocol allows', () => {

@@ -37,6 +37,34 @@ export class PostgresControlPlane implements AgentlinkControlPlanePort {
     return await this.withRepository((repository) => repository.registerDevice(input));
   }
 
+  async listCapabilityGrants(deviceId: string) {
+    return await this.withRepository((repository) => repository.listCapabilityGrants(deviceId));
+  }
+
+  async grantCapability(input: { deviceId: string; runnerId: string; capability: string; grantedBy: string }) {
+    return await this.withRepository((repository) => repository.grantCapability(input));
+  }
+
+  async revokeCapabilityGrant(grantId: string) {
+    return await this.withRepository((repository) => repository.revokeCapabilityGrant(grantId));
+  }
+
+  async listWorkdirGrants(deviceId: string) {
+    return await this.withRepository((repository) => repository.listWorkdirGrants(deviceId));
+  }
+
+  async grantWorkdir(input: { deviceId: string; pathPrefix: string; accessMode?: 'read' | 'write' | 'read_write' }) {
+    return await this.withRepository((repository) => repository.grantWorkdir(input));
+  }
+
+  async revokeWorkdirGrant(grantId: string) {
+    return await this.withRepository((repository) => repository.revokeWorkdirGrant(grantId));
+  }
+
+  async revokeDevice(deviceId: string, reason?: string) {
+    return await this.withRepository((repository) => repository.revokeDevice(deviceId, reason));
+  }
+
   async heartbeat(deviceId: string, deviceSecret: string) {
     return await this.withRepository((repository) => repository.heartbeat(deviceId, deviceSecret));
   }

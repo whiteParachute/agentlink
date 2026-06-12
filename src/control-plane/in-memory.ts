@@ -230,6 +230,12 @@ export class InMemoryControlPlane {
   }): CapabilityGrantRecord {
     const now = this.timestamp();
     const device = this.mustGetDevice(input.deviceId);
+    if (device.status === 'REVOKED') {
+      throw new AgentlinkError(409, 'AL_STATE_CONFLICT', 'Cannot grant capabilities to a revoked device');
+    }
+    if (input.domain && input.domain !== device.domain) {
+      throw new AgentlinkError(403, 'AL_POLICY_DENIED', 'Grant domain must match device domain');
+    }
     const runner = this.mustGetRunner(input.runnerId);
     if (runner.deviceId !== device.id) {
       throw new AgentlinkError(403, 'AL_POLICY_DENIED', 'Runner does not belong to device');
@@ -237,9 +243,19 @@ export class InMemoryControlPlane {
     if (!runner.capabilities.includes(input.capability)) {
       throw new AgentlinkError(403, 'AL_CAPABILITY_DENIED', 'Capability must be declared before it can be granted');
     }
+    const existing = [...this.capabilityGrants.values()].find(
+      (grant) =>
+        grant.domain === device.domain &&
+        grant.deviceId === device.id &&
+        grant.runnerId === runner.id &&
+        grant.capability === input.capability &&
+        grant.grantStatus === 'GRANTED' &&
+        !grant.revokedAt,
+    );
+    if (existing) return existing;
     const grant: CapabilityGrantRecord = {
       id: randomUUID(),
-      domain: input.domain ?? device.domain,
+      domain: device.domain,
       deviceId: device.id,
       runnerId: runner.id,
       capability: input.capability,
@@ -251,6 +267,26 @@ export class InMemoryControlPlane {
     return grant;
   }
 
+  listCapabilityGrants(deviceId: string): CapabilityGrantRecord[] {
+    this.mustGetDevice(deviceId);
+    return [...this.capabilityGrants.values()]
+      .filter((grant) => grant.deviceId === deviceId)
+      .sort((a, b) => a.grantedAt.localeCompare(b.grantedAt) || a.id.localeCompare(b.id));
+  }
+
+  revokeCapabilityGrant(grantId: string): CapabilityGrantRecord {
+    const grant = this.capabilityGrants.get(grantId);
+    if (!grant) throw new AgentlinkError(404, 'AL_CAPABILITY_GRANT_NOT_FOUND', 'Capability grant not found');
+    if (grant.grantStatus === 'REVOKED' && grant.revokedAt) return grant;
+    const revoked: CapabilityGrantRecord = {
+      ...grant,
+      grantStatus: 'REVOKED',
+      revokedAt: this.timestamp(),
+    };
+    this.capabilityGrants.set(grant.id, revoked);
+    return revoked;
+  }
+
   grantWorkdir(input: {
     domain?: Domain;
     deviceId: string;
@@ -259,19 +295,92 @@ export class InMemoryControlPlane {
   }): WorkdirGrantRecord {
     const now = this.timestamp();
     const device = this.mustGetDevice(input.deviceId);
+    if (device.status === 'REVOKED') {
+      throw new AgentlinkError(409, 'AL_STATE_CONFLICT', 'Cannot grant workdirs to a revoked device');
+    }
+    if (input.domain && input.domain !== device.domain) {
+      throw new AgentlinkError(403, 'AL_POLICY_DENIED', 'Grant domain must match device domain');
+    }
     if (!input.pathPrefix.startsWith('/')) {
       throw new AgentlinkError(403, 'AL_WORKDIR_DENIED', 'Workdir grant path_prefix must be absolute');
     }
+    const accessMode = input.accessMode ?? 'read_write';
+    const existing = [...this.workdirGrants.values()].find(
+      (grant) =>
+        grant.domain === device.domain &&
+        grant.deviceId === device.id &&
+        grant.pathPrefix === input.pathPrefix &&
+        grant.accessMode === accessMode &&
+        !grant.revokedAt,
+    );
+    if (existing) return existing;
     const grant: WorkdirGrantRecord = {
       id: randomUUID(),
-      domain: input.domain ?? device.domain,
+      domain: device.domain,
       deviceId: device.id,
       pathPrefix: input.pathPrefix,
-      accessMode: input.accessMode ?? 'read_write',
+      accessMode,
       createdAt: now,
     };
     this.workdirGrants.set(grant.id, grant);
     return grant;
+  }
+
+  listWorkdirGrants(deviceId: string): WorkdirGrantRecord[] {
+    this.mustGetDevice(deviceId);
+    return [...this.workdirGrants.values()]
+      .filter((grant) => grant.deviceId === deviceId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  }
+
+  revokeWorkdirGrant(grantId: string): WorkdirGrantRecord {
+    const grant = this.workdirGrants.get(grantId);
+    if (!grant) throw new AgentlinkError(404, 'AL_WORKDIR_GRANT_NOT_FOUND', 'Workdir grant not found');
+    if (grant.revokedAt) return grant;
+    const revoked: WorkdirGrantRecord = {
+      ...grant,
+      revokedAt: this.timestamp(),
+    };
+    this.workdirGrants.set(grant.id, revoked);
+    return revoked;
+  }
+
+  revokeDevice(deviceId: string, reason = 'device_revoked'): { device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] } {
+    const device = this.mustGetDevice(deviceId);
+    if (device.status === 'REVOKED') return { device, tasks: [], runs: [], leases: [] };
+    const now = this.timestamp();
+    const revokedDevice: DeviceRecord = {
+      ...device,
+      status: 'REVOKED',
+      revokedAt: now,
+      updatedAt: now,
+    };
+    this.devices.set(device.id, revokedDevice);
+
+    const tasks: TaskRecord[] = [];
+    const runs: RunRecord[] = [];
+    const leases: LeaseRecord[] = [];
+    for (const lease of [...this.leases.values()]) {
+      if (lease.deviceId !== device.id || !isActiveLeaseStatus(lease.status)) continue;
+      const run = this.runs.get(lease.runId);
+      if (!run || run.currentLeaseId !== lease.id || (run.status !== 'LEASED' && run.status !== 'RUNNING')) continue;
+
+      lease.status = 'CANCELLED';
+      lease.cancelledAt = now;
+      lease.expireReason = reason;
+      lease.updatedAt = now;
+      lease.version += 1;
+      leases.push(lease);
+
+      const cancelledRun = this.updateRun(run.id, { status: 'CANCELLED', finishedAt: now, updatedAt: now });
+      runs.push(cancelledRun);
+
+      const task = this.tasks.get(cancelledRun.taskId);
+      if (task && task.currentRunId === cancelledRun.id && task.status !== 'SUCCEEDED' && task.status !== 'FAILED' && task.status !== 'CANCELLED') {
+        tasks.push(this.updateTask(task.id, { status: 'CANCELLED', updatedAt: now }));
+      }
+    }
+    return { device: revokedDevice, tasks, runs, leases };
   }
 
   heartbeat(deviceId: string, deviceSecret: string): DeviceRecord {

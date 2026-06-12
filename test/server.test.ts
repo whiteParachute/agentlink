@@ -224,6 +224,108 @@ test('HTTP API rejects unacked progress and keeps external DTOs snake_case', asy
   });
 });
 
+test('HTTP grant management APIs add and revoke grants with snake_case DTOs', async () => {
+  await withServer(async (baseUrl) => {
+    const register = await postJson(baseUrl, '/api/v1/devices/register', {
+      display_name: 'claw-tenc',
+      owner_user_id: 'whiteParachute',
+    });
+    assert.equal(register.status, 201);
+    const registered = (await register.json()) as { device_id: string; runner_id: string; device_secret: string };
+
+    const capabilityCreate = await postJson(baseUrl, `/api/v1/devices/${registered.device_id}/capability-grants`, {
+      runner_id: registered.runner_id,
+      capability: 'codex:exec',
+      granted_by: 'operator',
+    });
+    assert.equal(capabilityCreate.status, 201);
+    const capabilityBody = (await capabilityCreate.json()) as { capability_grant: { id: string; device_id: string; runner_id: string; grant_status: string; granted_by: string; deviceId?: string } };
+    assert.equal(capabilityBody.capability_grant.device_id, registered.device_id);
+    assert.equal(capabilityBody.capability_grant.runner_id, registered.runner_id);
+    assert.equal(capabilityBody.capability_grant.grant_status, 'GRANTED');
+    assert.equal(capabilityBody.capability_grant.granted_by, 'operator');
+    assert.equal(capabilityBody.capability_grant.deviceId, undefined);
+
+    const capabilityList = await fetch(`${baseUrl}/api/v1/devices/${registered.device_id}/capability-grants`);
+    assert.equal(capabilityList.status, 200);
+    assert.equal(((await capabilityList.json()) as { capability_grants: unknown[] }).capability_grants.length, 1);
+
+    const workdirCreate = await postJson(baseUrl, `/api/v1/devices/${registered.device_id}/workdir-grants`, {
+      path_prefix: DEFAULT_WORKSPACE,
+      access_mode: 'read_write',
+    });
+    assert.equal(workdirCreate.status, 201);
+    const workdirBody = (await workdirCreate.json()) as { workdir_grant: { id: string; device_id: string; path_prefix: string; access_mode: string; pathPrefix?: string } };
+    assert.equal(workdirBody.workdir_grant.device_id, registered.device_id);
+    assert.equal(workdirBody.workdir_grant.path_prefix, DEFAULT_WORKSPACE);
+    assert.equal(workdirBody.workdir_grant.access_mode, 'read_write');
+    assert.equal(workdirBody.workdir_grant.pathPrefix, undefined);
+
+    const workdirList = await fetch(`${baseUrl}/api/v1/devices/${registered.device_id}/workdir-grants`);
+    assert.equal(workdirList.status, 200);
+    assert.equal(((await workdirList.json()) as { workdir_grants: unknown[] }).workdir_grants.length, 1);
+
+    const revokeCapability = await postJson(baseUrl, `/api/v1/capability-grants/${capabilityBody.capability_grant.id}/revoke`, {});
+    assert.equal(revokeCapability.status, 200);
+    assert.equal(((await revokeCapability.json()) as { capability_grant: { grant_status: string; revoked_at?: string } }).capability_grant.grant_status, 'REVOKED');
+
+    const auth = { authorization: `Bearer ${registered.device_secret}` };
+    await postJson(baseUrl, `/api/v1/devices/${registered.device_id}/heartbeat`, {}, auth);
+    await postJson(
+      baseUrl,
+      '/api/v1/tasks',
+      { source: 'telegram', source_ref: 'telegram:grant-revoked', payload: { text: 'should deny after grant revoke' } },
+      { 'idempotency-key': 'telegram:grant-revoked' },
+    );
+    const pullAfterCapabilityRevoke = await postJson(baseUrl, '/api/v1/agentlet/pull', { device_id: registered.device_id, runner_id: registered.runner_id }, auth);
+    assert.equal(pullAfterCapabilityRevoke.status, 403);
+    assert.equal(((await pullAfterCapabilityRevoke.json()) as { error: { code: string } }).error.code, 'AL_CAPABILITY_DENIED');
+
+    const revokeWorkdir = await postJson(baseUrl, `/api/v1/workdir-grants/${workdirBody.workdir_grant.id}/revoke`, {});
+    assert.equal(revokeWorkdir.status, 200);
+    assert.equal(typeof ((await revokeWorkdir.json()) as { workdir_grant: { revoked_at?: string } }).workdir_grant.revoked_at, 'string');
+  });
+});
+
+test('HTTP device revoke cascades active work and revokes token', async () => {
+  await withServer(async (baseUrl) => {
+    const register = await postJson(baseUrl, '/api/v1/devices/register', {
+      display_name: 'claw-tenc',
+      owner_user_id: 'whiteParachute',
+      capability_grants: ['codex:exec'],
+      workdir_grants: [{ path_prefix: DEFAULT_WORKSPACE, access_mode: 'read_write' }],
+    });
+    assert.equal(register.status, 201);
+    const registered = (await register.json()) as { device_id: string; runner_id: string; device_secret: string };
+    const auth = { authorization: `Bearer ${registered.device_secret}` };
+    await postJson(baseUrl, `/api/v1/devices/${registered.device_id}/heartbeat`, {}, auth);
+    await postJson(
+      baseUrl,
+      '/api/v1/tasks',
+      { source: 'telegram', source_ref: 'telegram:device-revoke', payload: { text: 'cancel by revoke' } },
+      { 'idempotency-key': 'telegram:device-revoke' },
+    );
+    const pull = await postJson(baseUrl, '/api/v1/agentlet/pull', { device_id: registered.device_id, runner_id: registered.runner_id }, auth);
+    assert.equal(pull.status, 200);
+    const pulled = (await pull.json()) as { lease_id: string };
+    assert.equal((await postJson(baseUrl, '/api/v1/agentlet/ack', { device_id: registered.device_id, lease_id: pulled.lease_id, accepted: true }, auth)).status, 200);
+
+    const revoke = await postJson(baseUrl, `/api/v1/devices/${registered.device_id}/revoke`, { reason: 'operator_revoked' });
+    assert.equal(revoke.status, 200);
+    const revoked = (await revoke.json()) as { device: { status: string; revoked_at?: string }; tasks: Array<{ status: string }>; runs: Array<{ status: string }>; leases: Array<{ status: string; expire_reason: string }> };
+    assert.equal(revoked.device.status, 'REVOKED');
+    assert.equal(typeof revoked.device.revoked_at, 'string');
+    assert.equal(revoked.tasks[0]?.status, 'CANCELLED');
+    assert.equal(revoked.runs[0]?.status, 'CANCELLED');
+    assert.equal(revoked.leases[0]?.status, 'CANCELLED');
+    assert.equal(revoked.leases[0]?.expire_reason, 'operator_revoked');
+
+    const pollAfterRevoke = await postJson(baseUrl, '/api/v1/agentlet/control/poll', { device_id: registered.device_id }, auth);
+    assert.equal(pollAfterRevoke.status, 401);
+    assert.equal(((await pollAfterRevoke.json()) as { error: { code: string } }).error.code, 'AL_TOKEN_REVOKED');
+  });
+});
+
 test('agentlet lease operations reject wrong tokens and cross-device lease access', async () => {
   await withServer(async (baseUrl) => {
     const aRegister = await postJson(baseUrl, '/api/v1/devices/register', {
