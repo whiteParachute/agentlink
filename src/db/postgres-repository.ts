@@ -568,7 +568,13 @@ export class PostgreSqlRepository {
     const now = nowDate.toISOString();
     const expiresAt = new Date(nowDate.getTime() + this.leaseTtlMs).toISOString();
     const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.recoverContinue, [leaseId, deviceId, now, expiresAt]);
-    if (result.rowCount === 0) throw new AgentlinkError(409, 'AL_LEASE_EXPIRED', 'Lease is not recoverable');
+    if (result.rowCount === 0) {
+      const recoverable = await this.client.query<EnvelopeRow>(PostgreSqlStatements.findRecoverableLeaseForDecision, [leaseId, deviceId]);
+      if (recoverable.rowCount > 0) {
+        throw new AgentlinkError(409, 'AL_STATE_CONFLICT', 'Lease must be ACKED or RENEWED and Run must be RUNNING');
+      }
+      throw new AgentlinkError(409, 'AL_LEASE_EXPIRED', 'Lease is not recoverable');
+    }
     const row = requireSingleRow(result, 'AL_INTERNAL', 'Recover continue returned rowCount without a row');
     return { lease: mapLease(row.lease), run: mapRun(row.run), task: mapTask(row.task) };
   }

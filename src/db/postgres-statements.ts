@@ -791,6 +791,18 @@ ORDER BY l.updated_at ASC, l.id ASC
 LIMIT $2;
 `,
 
+  findRecoverableLeaseForDecision: `
+SELECT row_to_json(l) AS lease, row_to_json(r) AS run
+FROM al_run_lease l
+JOIN al_run r ON r.id = l.run_id
+WHERE l.id = $1
+  AND l.device_id = $2
+  AND l.status IN ${ACTIVE_LEASE_STATUSES_SQL}
+  AND r.current_lease_id = l.id
+  AND r.status IN ('LEASED', 'RUNNING')
+LIMIT 1;
+`,
+
   recoverContinue: `
 WITH target AS (
   SELECT r.id AS run_id, r.task_id, l.id AS lease_id

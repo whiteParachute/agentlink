@@ -38,13 +38,14 @@ Agentlink 仍处于 M1 开发阶段，当前仓库已经包含：
 - in-memory control plane，用于协议级测试；
 - PostgreSQL schema、SQL contract、repository adapter 和 `pg` runtime adapter；
 - 可选 PostgreSQL-backed server mode：`AGENTLINK_STORAGE=postgres`；
+- `db:smoke` 在真实 PostgreSQL DSN 下会创建临时 schema，验证 migration、active lease 唯一约束、并发 skip locked、renew/recover/control action 等关键合同；
 - 静态 capability grant / workdir grant 派发前校验；
 - agentlet `pull` / `ack` / `lease/renew` / `control/poll` / `control/ack` / `recover` / `recover/decision` / `progress` / `complete` 的协议骨架；
 - GitHub Actions CI 和 Node 内置测试。
 
 还未包含：
 
-- 真实 PostgreSQL DSN 下的完整并发 lease 验证；
+- CI 中固定运行的真实 PostgreSQL DSN 环境和更完整的故障注入 / 并发压力测试；
 - 常驻 agentlet daemon；
 - Codex Runner Adapter；
 - Telegram Adapter；
@@ -70,13 +71,19 @@ npm start
 
 ## PostgreSQL
 
-运行 migration smoke test：
+运行 PostgreSQL smoke test：
 
 ```bash
 AGENTLINK_DATABASE_URL=postgres://... npm run db:smoke
 ```
 
-未设置 `AGENTLINK_DATABASE_URL` 时，`db:smoke` 会按设计跳过并返回成功。
+未设置 `AGENTLINK_DATABASE_URL` 时，`db:smoke` 会按设计跳过并返回成功。设置后，脚本会在临时 schema 中应用 migration，并验证核心 PostgreSQL 合同：
+
+- active lease partial unique index；
+- `FOR UPDATE SKIP LOCKED` 下的并发领取行为；
+- `lease/renew` 与 `recoverContinue` 只能在 `ACKED/RENEWED + RUNNING` 上成功；
+- `recoverDiscard` 可以清理 active lease；
+- control action 的 poll / ack 基础路径。
 
 启用 PostgreSQL-backed server mode：
 

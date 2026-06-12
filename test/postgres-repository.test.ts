@@ -513,6 +513,35 @@ test('PostgreSqlRepository renews leases, acknowledges control actions, and appl
   assert.equal(continued.run.status, 'RUNNING');
   assert.deepEqual(continueClient.calls.map((call) => call.sql), [PostgreSqlStatements.recoverContinue]);
 
+  const unackedContinueClient = new ScriptedSqlClient();
+  unackedContinueClient.enqueue(none());
+  unackedContinueClient.enqueue(one({
+    lease: leaseRow({ status: 'ISSUED', acked_at: null }),
+    run: runRow({ status: 'LEASED', current_lease_id: '00000000-0000-4000-8000-000000000201' }),
+  }));
+  const unackedContinueRepo = new PostgreSqlRepository(unackedContinueClient, { now: () => new Date(NOW) });
+  await assert.rejects(
+    unackedContinueRepo.recoverContinue('00000000-0000-4000-8000-000000000201', '00000000-0000-4000-8000-000000000301'),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_STATE_CONFLICT',
+  );
+  assert.deepEqual(unackedContinueClient.calls.map((call) => call.sql), [
+    PostgreSqlStatements.recoverContinue,
+    PostgreSqlStatements.findRecoverableLeaseForDecision,
+  ]);
+
+  const staleContinueClient = new ScriptedSqlClient();
+  staleContinueClient.enqueue(none());
+  staleContinueClient.enqueue(none());
+  const staleContinueRepo = new PostgreSqlRepository(staleContinueClient, { now: () => new Date(NOW) });
+  await assert.rejects(
+    staleContinueRepo.recoverContinue('00000000-0000-4000-8000-000000000201', '00000000-0000-4000-8000-000000000301'),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_LEASE_EXPIRED',
+  );
+  assert.deepEqual(staleContinueClient.calls.map((call) => call.sql), [
+    PostgreSqlStatements.recoverContinue,
+    PostgreSqlStatements.findRecoverableLeaseForDecision,
+  ]);
+
   const discardClient = new ScriptedSqlClient();
   discardClient.enqueue(one({
     lease: leaseRow({ status: 'EXPIRED', expire_reason: 'lost_process' }),
