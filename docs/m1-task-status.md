@@ -142,3 +142,14 @@ This document maps the reviewed M1 technical-design tasks (`AL-TD-*`) to the rep
 - Runner progress sequence is local to the agentlet progress stream: lifecycle, stdout, stderr, error, and final events are emitted with monotonically increasing `seq`; control-plane system/audit events remain separate.
 - Added fake command-runner tests for command construction, workspace validation, env allowlist, stdout/stderr progress mapping, successful completion, non-zero failure, and external cancel. Tests do not invoke a real Codex CLI.
 - README now lists the Codex Runner Adapter as a skeleton, not as a deployable daemon. Remaining gaps are real agentlet daemon wiring, real Codex CLI device smoke, process cleanup hardening, Telegram Adapter, and end-to-end M1 validation.
+
+## 2026-06-12 memory-first M1 transition (AL-M1-001)
+
+The Agentlink product direction was rewritten to a **memory-first multi-entry Agent collaboration and execution-routing system** (new PRD `HJ7gdnTcDoCx1HxCyRzcr2zyngb`, revision 53). The `AL-TD-*` matrix above is **not** the completion measure of the new PRD's memory-first main line. It now describes the **execution substrate** (Task / Run / Lease / Device / Runner / Policy / Grant / Agentlet / Codex Runner) that the memory-first M1 reuses, defers, or adjusts — not the new Entry / SourceEvent / Session / Memory / Main Agent main line.
+
+- The `AL-TD-*` tasks are **not deprecated**; they are reclassified as execution substrate for memory-first M1.
+- The memory-first M1 main line is tracked by the new `AL-M1-*` slices and `AL-TD-MEM-* / AL-TD-INGRESS-* / AL-TD-WORKER-*` tasks in the new PRD, not by this matrix.
+- AL-M1-001 (this slice, docs-only) records the reuse boundary in [`docs/m1-control-plane-reuse-boundary.md`](./m1-control-plane-reuse-boundary.md), classifying each control-plane object as Reuse / Adjust / Defer / Keep / Not-in-M1.
+- Reading guidance: a `Partial` / `Done` status in the `AL-TD-*` matrix only reflects execution-substrate readiness; it does not imply any memory-first capability (Entry/SourceEvent/Session/Memory) exists yet. No memory / source_event / session tables, entities, or APIs exist in the repo at HEAD `e0c9117`.
+
+See `docs/m1-control-plane-reuse-boundary.md` for the per-object classification, prohibited extensions, and the explicit "must not start in M1" list (MemoryBridge, work/personal interop, legacy system import, AgentDock/happyclaw/Keyclaw/Hermes runtime, multi-MainUser, Telegram main-line E2E, production daemon / multi-device fallback).
