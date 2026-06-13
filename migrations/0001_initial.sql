@@ -253,6 +253,38 @@ CREATE TABLE al_main_user_profile (
   updated_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- AL-M1-004 ordinary channel user plus one-platform-identity binding. These
+-- tables intentionally do not carry domain, main_user_id, or tenant fields.
+CREATE TABLE al_channel_user (
+  id uuid PRIMARY KEY,
+  display_name text NOT NULL DEFAULT 'Channel User',
+  category text NOT NULL DEFAULT 'unclassified' CHECK (category ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'),
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
+  retention_class al_retention_class NOT NULL DEFAULT 'operational',
+  memory_space text NOT NULL DEFAULT 'default' CHECK (memory_space ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  source_system text NOT NULL DEFAULT 'agentlink' CHECK (source_system ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  sensitivity al_sensitivity NOT NULL DEFAULT 'internal',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE al_platform_identity (
+  id uuid PRIMARY KEY,
+  channel_user_id uuid NOT NULL REFERENCES al_channel_user(id) ON DELETE CASCADE,
+  platform text NOT NULL CHECK (platform ~ '^[a-z][a-z0-9._:-]{0,63}$'),
+  external_id text NOT NULL CHECK (length(external_id) BETWEEN 1 AND 512),
+  normalized_external_id text NOT NULL CHECK (length(normalized_external_id) BETWEEN 1 AND 512),
+  display_name text NOT NULL DEFAULT 'Platform User',
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
+  retention_class al_retention_class NOT NULL DEFAULT 'operational',
+  memory_space text NOT NULL DEFAULT 'default' CHECK (memory_space ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  source_system text NOT NULL DEFAULT 'agentlink' CHECK (source_system ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  sensitivity al_sensitivity NOT NULL DEFAULT 'internal',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (platform, normalized_external_id)
+);
+
 
 CREATE INDEX idx_al_task_domain_status_created ON al_task(domain, status, created_at DESC);
 CREATE UNIQUE INDEX uq_al_run_task_attempt ON al_run(task_id, attempt_no);
@@ -272,6 +304,8 @@ WHERE revoked_at IS NULL;
 CREATE INDEX idx_al_policy_decision_run ON al_policy_decision(run_id);
 CREATE INDEX idx_al_control_action_device_status_created ON al_control_action(device_id, status, created_at);
 CREATE INDEX idx_al_audit_log_domain_created ON al_audit_log(domain, created_at DESC);
+CREATE INDEX idx_al_channel_user_category ON al_channel_user(category);
+CREATE INDEX idx_al_platform_identity_channel_user ON al_platform_identity(channel_user_id);
 
 -- AL-M1-002 retention lookup indexes: support querying long-lived objects by
 -- their retention boundary (memory_space + retention_class) per domain.

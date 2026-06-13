@@ -224,3 +224,32 @@ export interface MainUserRecord {
   createdAt: string;
   updatedAt: string;
 }
+
+export interface ChannelUserRecord {
+  id: string;
+  displayName: string;
+  category: string;
+  metadata: JsonRecord;
+  retentionClass: RetentionClass;
+  memorySpace: string;
+  sourceSystem: string;
+  sensitivity: Sensitivity;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface PlatformIdentityRecord {
+  id: string;
+  channelUserId: string;
+  platform: string;
+  externalId: string;
+  normalizedExternalId: string;
+  displayName: string;
+  metadata: JsonRecord;
+  retentionClass: RetentionClass;
+  memorySpace: string;
+  sourceSystem: string;
+  sensitivity: Sensitivity;
+  createdAt: string;
+  updatedAt: string;
+}

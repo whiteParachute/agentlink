@@ -31,6 +31,14 @@ async function postJson(baseUrl: string, path: string, body: unknown, headers: R
   });
 }
 
+async function patchJson(baseUrl: string, path: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
+  return fetch(`${baseUrl}${path}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify(body),
+  });
+}
+
 test('health, ready, and meta endpoints return service metadata', async () => {
   await withServer(async (baseUrl) => {
     const health = await fetch(`${baseUrl}/healthz`);
@@ -986,5 +994,96 @@ test('POST /api/v1/main-user/profile rejects non-object metadata with 400', asyn
     assert.equal(resp.status, 400);
     const body = (await resp.json()) as { error: { code: string } };
     assert.equal(body.error.code, 'AL_BAD_REQUEST');
+  });
+});
+
+test('HTTP channel user upsert repeats into same ChannelUser and returns snake_case DTOs', async () => {
+  await withServer(async (baseUrl) => {
+    const first = await postJson(baseUrl, '/api/v1/channel-users/upsert', {
+      platform: ' Feishu ',
+      external_id: ' Open-ID ',
+      display_name: 'Alice',
+      channel_user_metadata: { source: 'chat' },
+      platform_identity_metadata: { chat: 'oc_1' },
+    });
+    assert.equal(first.status, 201);
+    const firstBody = (await first.json()) as {
+      created: boolean;
+      channel_user: { id: string; display_name: string; category: string; retention: Record<string, string>; displayName?: string };
+      platform_identity: { id: string; channel_user_id: string; platform: string; external_id: string; normalized_external_id: string; metadata: Record<string, unknown>; channelUserId?: string };
+    };
+    assert.equal(firstBody.created, true);
+    assert.equal(firstBody.channel_user.display_name, 'Alice');
+    assert.equal(firstBody.channel_user.displayName, undefined);
+    assert.equal(firstBody.channel_user.category, 'unclassified');
+    assert.equal(firstBody.channel_user.retention.retention_class, 'operational');
+    assert.equal(firstBody.platform_identity.platform, 'feishu');
+    assert.equal(firstBody.platform_identity.external_id, 'Open-ID');
+    assert.equal(firstBody.platform_identity.normalized_external_id, 'Open-ID');
+    assert.equal(firstBody.platform_identity.channelUserId, undefined);
+
+    const replay = await postJson(baseUrl, '/api/v1/channel-users/upsert', {
+      platform: 'feishu',
+      external_id: 'Open-ID',
+      display_name: 'Alice Updated',
+      platform_identity_metadata: { chat: 'oc_2' },
+    });
+    assert.equal(replay.status, 200);
+    const replayBody = (await replay.json()) as typeof firstBody;
+    assert.equal(replayBody.created, false);
+    assert.equal(replayBody.channel_user.id, firstBody.channel_user.id);
+    assert.equal(replayBody.platform_identity.id, firstBody.platform_identity.id);
+    assert.equal(replayBody.channel_user.display_name, 'Alice Updated');
+    assert.deepEqual(replayBody.platform_identity.metadata, { chat: 'oc_2' });
+  });
+});
+
+test('HTTP channel user category and platform identity resolve cover found/not found and validation', async () => {
+  await withServer(async (baseUrl) => {
+    const created = await postJson(baseUrl, '/api/v1/channel-users/upsert', {
+      platform: 'telegram',
+      external_id: 'User-1',
+    });
+    assert.equal(created.status, 201);
+    const body = (await created.json()) as { channel_user: { id: string } };
+
+    const category = await patchJson(baseUrl, `/api/v1/channel-users/${body.channel_user.id}/category`, { category: 'family.child' });
+    assert.equal(category.status, 200);
+    assert.equal(((await category.json()) as { channel_user: { category: string } }).channel_user.category, 'family.child');
+
+    const invalidCategory = await patchJson(baseUrl, `/api/v1/channel-users/${body.channel_user.id}/category`, { category: '-bad' });
+    assert.equal(invalidCategory.status, 400);
+    assert.equal(((await invalidCategory.json()) as { error: { code: string } }).error.code, 'AL_BAD_REQUEST');
+
+    const missingCategory = await patchJson(baseUrl, '/api/v1/channel-users/missing/category', { category: 'family' });
+    assert.equal(missingCategory.status, 404);
+    assert.equal(((await missingCategory.json()) as { error: { code: string } }).error.code, 'AL_CHANNEL_USER_NOT_FOUND');
+
+    const resolved = await fetch(`${baseUrl}/api/v1/platform-identities/resolve?platform=Telegram&external_id=User-1`);
+    assert.equal(resolved.status, 200);
+    const resolvedBody = (await resolved.json()) as { channel_user: { id: string }; platform_identity: { platform: string } };
+    assert.equal(resolvedBody.channel_user.id, body.channel_user.id);
+    assert.equal(resolvedBody.platform_identity.platform, 'telegram');
+
+    const notFound = await fetch(`${baseUrl}/api/v1/platform-identities/resolve?platform=telegram&external_id=missing`);
+    assert.equal(notFound.status, 404);
+    assert.equal(((await notFound.json()) as { error: { code: string } }).error.code, 'AL_PLATFORM_IDENTITY_NOT_FOUND');
+
+    const badQuery = await fetch(`${baseUrl}/api/v1/platform-identities/resolve?platform=telegram`);
+    assert.equal(badQuery.status, 400);
+    assert.equal(((await badQuery.json()) as { error: { code: string } }).error.code, 'AL_BAD_REQUEST');
+  });
+});
+
+test('HTTP channel user upsert does not merge different platform or external_id', async () => {
+  await withServer(async (baseUrl) => {
+    const a = await postJson(baseUrl, '/api/v1/channel-users/upsert', { platform: 'feishu', external_id: 'same' });
+    const b = await postJson(baseUrl, '/api/v1/channel-users/upsert', { platform: 'telegram', external_id: 'same' });
+    const c = await postJson(baseUrl, '/api/v1/channel-users/upsert', { platform: 'feishu', external_id: 'Same' });
+    const ab = (await a.json()) as { channel_user: { id: string } };
+    const bb = (await b.json()) as { channel_user: { id: string } };
+    const cb = (await c.json()) as { channel_user: { id: string } };
+    assert.notEqual(bb.channel_user.id, ab.channel_user.id);
+    assert.notEqual(cb.channel_user.id, ab.channel_user.id);
   });
 });

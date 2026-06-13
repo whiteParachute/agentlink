@@ -5,7 +5,7 @@ import { InMemoryControlPlane, type CreateTaskInput, type RegisterDeviceInput } 
 import { PostgresControlPlane } from './control-plane/postgres.js';
 import type { AgentlinkControlPlanePort } from './control-plane/port.js';
 import { PgRuntime } from './db/pg-client.js';
-import type { CapabilityGrantRecord, DeviceRecord, JsonRecord, MainUserRecord, RunRecord, RunnerRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
+import type { CapabilityGrantRecord, ChannelUserRecord, DeviceRecord, JsonRecord, MainUserRecord, PlatformIdentityRecord, RunRecord, RunnerRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
 import { RetentionMetadataError, type RetentionMetadataInput } from './domain/retention.js';
 import type { RunStatus } from './domain/status.js';
 import { sendJson } from './http/json.js';
@@ -93,6 +93,7 @@ async function handleRequest(
         'agentlet-recover-decision',
         'agentlet-progress',
         'agentlet-complete',
+        'channel-user-api',
       ],
     });
     return;
@@ -120,6 +121,51 @@ async function handleRequest(
       ...(retention ? { retention } : {}),
     });
     sendJson(res, result.created ? 201 : 200, { main_user: toMainUserDto(result.mainUser), created: result.created });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v1/channel-users/upsert') {
+    const body = await readJsonRecord(req);
+    const displayName = optionalNonEmptyString(body, 'display_name');
+    const channelUserMetadata = optionalRecord(body, 'channel_user_metadata');
+    const platformIdentityMetadata = optionalRecord(body, 'platform_identity_metadata');
+    const retention = optionalRetention(body, 'retention');
+    const result = await controlPlane.upsertChannelUser({
+      platform: requireString(body, 'platform'),
+      externalId: requireString(body, 'external_id'),
+      ...(displayName ? { displayName } : {}),
+      ...(channelUserMetadata ? { channelUserMetadata } : {}),
+      ...(platformIdentityMetadata ? { platformIdentityMetadata } : {}),
+      ...(retention ? { retention } : {}),
+    });
+    sendJson(res, result.created ? 201 : 200, {
+      channel_user: toChannelUserDto(result.channelUser),
+      platform_identity: toPlatformIdentityDto(result.platformIdentity),
+      created: result.created,
+    });
+    return;
+  }
+
+  const channelUserCategoryMatch = /^\/api\/v1\/channel-users\/([^/]+)\/category$/.exec(url.pathname);
+  if (req.method === 'PATCH' && channelUserCategoryMatch) {
+    const body = await readJsonRecord(req);
+    const result = await controlPlane.setChannelUserCategory({
+      channelUserId: channelUserCategoryMatch[1] ?? '',
+      category: requireString(body, 'category'),
+    });
+    sendJson(res, 200, { channel_user: toChannelUserDto(result.channelUser) });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/v1/platform-identities/resolve') {
+    const platform = requireQueryString(url, 'platform');
+    const externalId = requireQueryString(url, 'external_id');
+    const result = await controlPlane.resolvePlatformIdentity({ platform, externalId });
+    if (!result) throw new AgentlinkError(404, 'AL_PLATFORM_IDENTITY_NOT_FOUND', 'Platform identity not found');
+    sendJson(res, 200, {
+      channel_user: toChannelUserDto(result.channelUser),
+      platform_identity: toPlatformIdentityDto(result.platformIdentity),
+    });
     return;
   }
 
@@ -626,6 +672,43 @@ function toMainUserDto(mainUser: MainUserRecord) {
   return dto;
 }
 
+function toChannelUserDto(channelUser: ChannelUserRecord) {
+  return {
+    id: channelUser.id,
+    display_name: channelUser.displayName,
+    category: channelUser.category,
+    metadata: channelUser.metadata,
+    retention: {
+      retention_class: channelUser.retentionClass,
+      memory_space: channelUser.memorySpace,
+      source_system: channelUser.sourceSystem,
+      sensitivity: channelUser.sensitivity,
+    },
+    created_at: channelUser.createdAt,
+    updated_at: channelUser.updatedAt,
+  };
+}
+
+function toPlatformIdentityDto(platformIdentity: PlatformIdentityRecord) {
+  return {
+    id: platformIdentity.id,
+    channel_user_id: platformIdentity.channelUserId,
+    platform: platformIdentity.platform,
+    external_id: platformIdentity.externalId,
+    normalized_external_id: platformIdentity.normalizedExternalId,
+    display_name: platformIdentity.displayName,
+    metadata: platformIdentity.metadata,
+    retention: {
+      retention_class: platformIdentity.retentionClass,
+      memory_space: platformIdentity.memorySpace,
+      source_system: platformIdentity.sourceSystem,
+      sensitivity: platformIdentity.sensitivity,
+    },
+    created_at: platformIdentity.createdAt,
+    updated_at: platformIdentity.updatedAt,
+  };
+}
+
 async function ensureLeaseBelongsToDevice(controlPlane: AgentlinkControlPlanePort, leaseId: string, deviceId: string): Promise<void> {
   const lease = await controlPlane.getLease(leaseId);
   if (!lease) throw new AgentlinkError(404, 'AL_LEASE_NOT_FOUND', 'Lease not found');
@@ -661,6 +744,12 @@ function getIdempotencyKey(req: IncomingMessage, body: JsonRecord): string {
   if (typeof header === 'string' && header.length > 0) return header;
   const bodyValue = body.idempotency_key;
   return typeof bodyValue === 'string' ? bodyValue : '';
+}
+
+function requireQueryString(url: URL, key: string): string {
+  const value = url.searchParams.get(key);
+  if (typeof value !== 'string' || value.length === 0) throw new AgentlinkError(400, 'AL_BAD_REQUEST', `${key} must be a non-empty string`);
+  return value;
 }
 
 function requireBearer(req: IncomingMessage): string {

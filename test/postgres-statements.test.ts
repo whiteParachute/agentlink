@@ -287,3 +287,36 @@ test('main user upsert writes repository-merged profile fields on conflict', () 
   assert.match(sql, /timezone = EXCLUDED\.timezone/i);
   assert.match(sql, /metadata = EXCLUDED\.metadata/i);
 });
+
+test('channel user statements use explicit row_to_json envelopes and unique identity lookup', () => {
+  assert.match(PostgreSqlStatements.findPlatformIdentityByNormalized, /FROM al_platform_identity pi/i);
+  assert.match(PostgreSqlStatements.findPlatformIdentityByNormalized, /JOIN al_channel_user cu ON cu\.id = pi\.channel_user_id/i);
+  assert.match(PostgreSqlStatements.findPlatformIdentityByNormalized, /pi\.platform = \$1/i);
+  assert.match(PostgreSqlStatements.findPlatformIdentityByNormalized, /pi\.normalized_external_id = \$2/i);
+  assert.match(PostgreSqlStatements.findPlatformIdentityByNormalized, /row_to_json\(cu\) AS channel_user/i);
+  assert.match(PostgreSqlStatements.findPlatformIdentityByNormalized, /row_to_json\(pi\) AS platform_identity/i);
+
+  assert.match(PostgreSqlStatements.insertChannelUser, /INSERT INTO al_channel_user/i);
+  assert.match(PostgreSqlStatements.insertChannelUser, /category/i);
+  assert.match(PostgreSqlStatements.insertChannelUser, /RETURNING \*/i);
+  assert.match(PostgreSqlStatements.insertChannelUser, /SELECT row_to_json\(cu\) AS channel_user/i);
+
+  assert.match(PostgreSqlStatements.insertPlatformIdentity, /INSERT INTO al_platform_identity/i);
+  assert.match(PostgreSqlStatements.insertPlatformIdentity, /normalized_external_id/i);
+  assert.match(PostgreSqlStatements.insertPlatformIdentity, /SELECT row_to_json\(pi\) AS platform_identity/i);
+});
+
+test('channel user update statements preserve repository-controlled retention and category', () => {
+  assert.match(PostgreSqlStatements.updateChannelUser, /UPDATE al_channel_user/i);
+  assert.match(PostgreSqlStatements.updateChannelUser, /display_name = COALESCE\(\$2, display_name\)/i);
+  assert.match(PostgreSqlStatements.updateChannelUser, /metadata = COALESCE\(\$3::jsonb, metadata\)/i);
+  assert.match(PostgreSqlStatements.updateChannelUser, /retention_class = \$4::al_retention_class/i);
+
+  assert.match(PostgreSqlStatements.updatePlatformIdentity, /UPDATE al_platform_identity/i);
+  assert.match(PostgreSqlStatements.updatePlatformIdentity, /external_id = \$2/i);
+  assert.match(PostgreSqlStatements.updatePlatformIdentity, /normalized_external_id = \$3/i);
+  assert.match(PostgreSqlStatements.updatePlatformIdentity, /display_name = COALESCE\(\$4, display_name\)/i);
+
+  assert.match(PostgreSqlStatements.updateChannelUserCategory, /SET category = \$2/i);
+  assert.match(PostgreSqlStatements.updateChannelUserCategory, /WHERE id = \$1/i);
+});

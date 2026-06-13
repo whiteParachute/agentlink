@@ -3,12 +3,14 @@ import { AgentlinkError } from '../control-plane/errors.js';
 import type { CreateTaskInput } from '../control-plane/in-memory.js';
 import type {
   CapabilityGrantRecord,
+  ChannelUserRecord,
   ControlActionRecord,
   DeviceRecord,
   Domain,
   JsonRecord,
   LeaseRecord,
   MainUserRecord,
+  PlatformIdentityRecord,
   PolicyDecisionRecord,
   RecoverableRunRecord,
   RunEventRecord,
@@ -18,12 +20,16 @@ import type {
   WorkdirAccessMode,
   WorkdirGrantRecord,
 } from '../domain/entities.js';
+import { DEFAULT_USER_CATEGORY, normalizeExternalId, normalizePlatform, normalizeUserCategory } from '../domain/channel-user.js';
 import { evaluateDispatchPolicy } from '../domain/policy.js';
 import {
+  CHANNEL_USER_RETENTION_DEFAULTS,
   EVENT_RETENTION_DEFAULTS,
   MAIN_USER_RETENTION_DEFAULTS,
+  PLATFORM_IDENTITY_RETENTION_DEFAULTS,
   TASK_RETENTION_DEFAULTS,
   normalizeRetentionMetadata,
+  type RetentionMetadata,
   type RetentionMetadataInput,
   withoutRawRetention,
 } from '../domain/retention.js';
@@ -655,6 +661,102 @@ export class PostgreSqlRepository {
     return { mainUser, created: !existing };
   }
 
+  async upsertChannelUser(input: {
+    platform: string;
+    externalId: string;
+    displayName?: string;
+    channelUserMetadata?: JsonRecord;
+    platformIdentityMetadata?: JsonRecord;
+    retention?: RetentionMetadataInput;
+  }): Promise<{ channelUser: ChannelUserRecord; platformIdentity: PlatformIdentityRecord; created: boolean }> {
+    const platform = normalizePlatform(input.platform);
+    const externalId = normalizeExternalId(input.externalId);
+    const displayName = normalizeOptionalDisplayName(input.displayName);
+
+    try {
+      return await withTransaction(this.client, async (tx) => {
+        const existing = await this.findPlatformIdentityByNormalized(tx, platform, externalId);
+        if (existing) {
+          const updated = await this.updateExistingPlatformIdentity(tx, existing, {
+            externalId,
+            ...(displayName ? { displayName } : {}),
+            ...(input.channelUserMetadata ? { channelUserMetadata: input.channelUserMetadata } : {}),
+            ...(input.platformIdentityMetadata ? { platformIdentityMetadata: input.platformIdentityMetadata } : {}),
+            ...(input.retention ? { retention: input.retention } : {}),
+          });
+          return { ...updated, created: false };
+        }
+
+        const now = this.timestamp();
+        const channelRetention = normalizeRetentionMetadata(input.retention, CHANNEL_USER_RETENTION_DEFAULTS);
+        const identityRetention = normalizeRetentionMetadata(input.retention, PLATFORM_IDENTITY_RETENTION_DEFAULTS);
+        const channelUser = mapChannelUser(requireSingleRow(
+          await tx.query<EnvelopeRow>(PostgreSqlStatements.insertChannelUser, [
+            randomUUID(),
+            displayName ?? 'Channel User',
+            DEFAULT_USER_CATEGORY,
+            toJsonbParam(input.channelUserMetadata ?? {}),
+            channelRetention.retentionClass,
+            channelRetention.memorySpace,
+            channelRetention.sourceSystem,
+            channelRetention.sensitivity,
+            now,
+          ]),
+          'AL_INTERNAL',
+          'ChannelUser insert returned no row',
+        ).channel_user);
+        const platformIdentity = mapPlatformIdentity(requireSingleRow(
+          await tx.query<EnvelopeRow>(PostgreSqlStatements.insertPlatformIdentity, [
+            randomUUID(),
+            channelUser.id,
+            platform,
+            externalId,
+            externalId,
+            displayName ?? 'Platform User',
+            toJsonbParam(input.platformIdentityMetadata ?? {}),
+            identityRetention.retentionClass,
+            identityRetention.memorySpace,
+            identityRetention.sourceSystem,
+            identityRetention.sensitivity,
+            now,
+          ]),
+          'AL_INTERNAL',
+          'PlatformIdentity insert returned no row',
+        ).platform_identity);
+        return { channelUser, platformIdentity, created: true };
+      });
+    } catch (error: unknown) {
+      if (!isUniqueViolation(error)) throw error;
+      const recovered = await withTransaction(this.client, async (tx) => {
+        const existing = await this.findPlatformIdentityByNormalized(tx, platform, externalId);
+        if (!existing) throw error;
+        return await this.updateExistingPlatformIdentity(tx, existing, {
+          externalId,
+          ...(displayName ? { displayName } : {}),
+          ...(input.channelUserMetadata ? { channelUserMetadata: input.channelUserMetadata } : {}),
+          ...(input.platformIdentityMetadata ? { platformIdentityMetadata: input.platformIdentityMetadata } : {}),
+          ...(input.retention ? { retention: input.retention } : {}),
+        });
+      });
+      return { ...recovered, created: false };
+    }
+  }
+
+  async setChannelUserCategory(input: { channelUserId: string; category: string }): Promise<{ channelUser: ChannelUserRecord }> {
+    const category = normalizeUserCategory(input.category);
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.updateChannelUserCategory, [
+      input.channelUserId,
+      category,
+      this.timestamp(),
+    ]);
+    if (result.rowCount === 0) throw new AgentlinkError(404, 'AL_CHANNEL_USER_NOT_FOUND', 'Channel user not found');
+    return { channelUser: mapChannelUser(requireSingleRow(result, 'AL_INTERNAL', 'ChannelUser category update returned no row').channel_user) };
+  }
+
+  async resolvePlatformIdentity(input: { platform: string; externalId: string }): Promise<{ channelUser: ChannelUserRecord; platformIdentity: PlatformIdentityRecord } | undefined> {
+    return await this.findPlatformIdentityByNormalized(this.client, normalizePlatform(input.platform), normalizeExternalId(input.externalId));
+  }
+
   async revokeDevice(deviceId: string, reason = 'device_revoked'): Promise<{ device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] }> {
     return await withTransaction(this.client, async (tx) => {
       const now = this.timestamp();
@@ -758,6 +860,69 @@ export class PostgreSqlRepository {
     return { task: mapTask(row.task), run: mapRun(row.run) };
   }
 
+  private async findPlatformIdentityByNormalized(
+    client: SqlClient,
+    platform: string,
+    normalizedExternalId: string,
+  ): Promise<{ channelUser: ChannelUserRecord; platformIdentity: PlatformIdentityRecord } | undefined> {
+    const result = await client.query<EnvelopeRow>(PostgreSqlStatements.findPlatformIdentityByNormalized, [platform, normalizedExternalId]);
+    if (result.rowCount === 0) return undefined;
+    const row = requireSingleRow(result, 'AL_INTERNAL', 'PlatformIdentity lookup returned rowCount without a row');
+    return { channelUser: mapChannelUser(row.channel_user), platformIdentity: mapPlatformIdentity(row.platform_identity) };
+  }
+
+  private async updateExistingPlatformIdentity(
+    client: SqlClient,
+    existing: { channelUser: ChannelUserRecord; platformIdentity: PlatformIdentityRecord },
+    input: {
+      externalId: string;
+      displayName?: string;
+      channelUserMetadata?: JsonRecord;
+      platformIdentityMetadata?: JsonRecord;
+      retention?: RetentionMetadataInput;
+    },
+  ): Promise<{ channelUser: ChannelUserRecord; platformIdentity: PlatformIdentityRecord }> {
+    const now = this.timestamp();
+    const channelRetention = input.retention
+      ? normalizeRetentionMetadata(input.retention, CHANNEL_USER_RETENTION_DEFAULTS)
+      : recordRetention(existing.channelUser);
+    const identityRetention = input.retention
+      ? normalizeRetentionMetadata(input.retention, PLATFORM_IDENTITY_RETENTION_DEFAULTS)
+      : recordRetention(existing.platformIdentity);
+
+    const channelUser = mapChannelUser(requireSingleRow(
+      await client.query<EnvelopeRow>(PostgreSqlStatements.updateChannelUser, [
+        existing.channelUser.id,
+        input.displayName ?? null,
+        toNullableJsonbParam(input.channelUserMetadata),
+        channelRetention.retentionClass,
+        channelRetention.memorySpace,
+        channelRetention.sourceSystem,
+        channelRetention.sensitivity,
+        now,
+      ]),
+      'AL_INTERNAL',
+      'ChannelUser update returned no row',
+    ).channel_user);
+    const platformIdentity = mapPlatformIdentity(requireSingleRow(
+      await client.query<EnvelopeRow>(PostgreSqlStatements.updatePlatformIdentity, [
+        existing.platformIdentity.id,
+        input.externalId,
+        input.externalId,
+        input.displayName ?? null,
+        toNullableJsonbParam(input.platformIdentityMetadata),
+        identityRetention.retentionClass,
+        identityRetention.memorySpace,
+        identityRetention.sourceSystem,
+        identityRetention.sensitivity,
+        now,
+      ]),
+      'AL_INTERNAL',
+      'PlatformIdentity update returned no row',
+    ).platform_identity);
+    return { channelUser, platformIdentity };
+  }
+
   private timestamp(): string {
     return this.now().toISOString();
   }
@@ -781,6 +946,8 @@ interface EnvelopeRow {
   device?: unknown;
   runner?: unknown;
   main_user?: unknown;
+  channel_user?: unknown;
+  platform_identity?: unknown;
 }
 
 type RunEventRow = Record<string, unknown>;
@@ -803,6 +970,27 @@ function toJsonbParam(value: JsonRecord): string {
 
 function toNullableJsonbParam(value: JsonRecord | undefined): string | null {
   return value === undefined ? null : JSON.stringify(value);
+}
+
+function normalizeOptionalDisplayName(displayName: string | undefined): string | undefined {
+  if (displayName === undefined) return undefined;
+  const normalized = displayName.trim();
+  if (normalized.length === 0) throw new AgentlinkError(400, 'AL_BAD_REQUEST', 'display_name must be a non-empty string');
+  return normalized;
+}
+
+function recordRetention(record: {
+  retentionClass: RetentionMetadata['retentionClass'];
+  memorySpace: string;
+  sourceSystem: string;
+  sensitivity: RetentionMetadata['sensitivity'];
+}): RetentionMetadata {
+  return {
+    retentionClass: record.retentionClass,
+    memorySpace: record.memorySpace,
+    sourceSystem: record.sourceSystem,
+    sensitivity: record.sensitivity,
+  };
 }
 
 function requireSingleRow<Row>(result: SqlQueryResult<Row>, code: string, message: string): Row {
@@ -1013,6 +1201,41 @@ function mapMainUser(value: unknown): MainUserRecord {
     displayName: readString(row, 'display_name'),
     locale: readString(row, 'locale'),
     timezone: readString(row, 'timezone'),
+    metadata: readJsonRecord(row, 'metadata'),
+    retentionClass: readRetentionClass(row, 'retention_class'),
+    memorySpace: readString(row, 'memory_space'),
+    sourceSystem: readString(row, 'source_system'),
+    sensitivity: readSensitivity(row, 'sensitivity'),
+    createdAt: readTimestamp(row, 'created_at'),
+    updatedAt: readTimestamp(row, 'updated_at'),
+  };
+}
+
+function mapChannelUser(value: unknown): ChannelUserRecord {
+  const row = asRecord(value, 'channel_user');
+  return {
+    id: readString(row, 'id'),
+    displayName: readString(row, 'display_name'),
+    category: readString(row, 'category'),
+    metadata: readJsonRecord(row, 'metadata'),
+    retentionClass: readRetentionClass(row, 'retention_class'),
+    memorySpace: readString(row, 'memory_space'),
+    sourceSystem: readString(row, 'source_system'),
+    sensitivity: readSensitivity(row, 'sensitivity'),
+    createdAt: readTimestamp(row, 'created_at'),
+    updatedAt: readTimestamp(row, 'updated_at'),
+  };
+}
+
+function mapPlatformIdentity(value: unknown): PlatformIdentityRecord {
+  const row = asRecord(value, 'platform_identity');
+  return {
+    id: readString(row, 'id'),
+    channelUserId: readString(row, 'channel_user_id'),
+    platform: readString(row, 'platform'),
+    externalId: readString(row, 'external_id'),
+    normalizedExternalId: readString(row, 'normalized_external_id'),
+    displayName: readString(row, 'display_name'),
     metadata: readJsonRecord(row, 'metadata'),
     retentionClass: readRetentionClass(row, 'retention_class'),
     memorySpace: readString(row, 'memory_space'),

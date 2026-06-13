@@ -139,6 +139,22 @@ export const MAIN_USER_RETENTION_DEFAULTS: RetentionDefaults = {
   sourceSystem: DEFAULT_SOURCE_SYSTEM,
 };
 
+// Default retention boundaries for AL-M1-004 channel users and platform
+// identities: both are operational control-plane state owned by agentlink.
+export const CHANNEL_USER_RETENTION_DEFAULTS: RetentionDefaults = {
+  retentionClass: 'operational',
+  sensitivity: 'internal',
+  memorySpace: DEFAULT_MEMORY_SPACE,
+  sourceSystem: DEFAULT_SOURCE_SYSTEM,
+};
+
+export const PLATFORM_IDENTITY_RETENTION_DEFAULTS: RetentionDefaults = {
+  retentionClass: 'operational',
+  sensitivity: 'internal',
+  memorySpace: DEFAULT_MEMORY_SPACE,
+  sourceSystem: DEFAULT_SOURCE_SYSTEM,
+};
+
 
 // Strip raw retention from an input object so idempotency signatures only
 // depend on normalized retention metadata. This ensures that omitting

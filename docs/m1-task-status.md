@@ -178,3 +178,28 @@ See `docs/m1-control-plane-reuse-boundary.md` for the per-object classification,
 - Request DTOs stay snake_case (`display_name`, `locale`, `timezone`, `metadata`, `retention`); profile strings must be non-empty when supplied, `metadata` must be an object, and invalid retention values return `400 AL_BAD_REQUEST`.
 - Test count: 187. Tests cover MainUser retention defaults, migration singleton/table/out-of-scope invariants, in-memory create/read/update/singleton behavior, PostgreSQL statement shape, repository mapping/upsert/merge/invalid-retention behavior, and HTTP 404/201/200/400 flows.
 - Remaining gaps: no live PostgreSQL DSN smoke in this environment; MainUser is only the singleton profile anchor and does not implement ChannelUser / platform identity binding / GroupProfile / Entry / SourceEvent / Session / Memory / MemoryBridge / work-personal interop.
+
+## 2026-06-13 AL-M1-004 ChannelUser + PlatformIdentity update
+
+- Added the AL-M1-004 ordinary channel user and platform identity minimum model. `ChannelUserRecord` carries `id`, `displayName`, `category`, `metadata`, AL-M1-002 retention metadata, and timestamps. `PlatformIdentityRecord` carries `id`, `channelUserId`, `platform`, `externalId`, `normalizedExternalId`, `displayName`, `metadata`, AL-M1-002 retention metadata, and timestamps.
+- The new records intentionally have no `domain`, no `main_user_id`, and no tenant field. MainUser remains the singleton profile anchor from AL-M1-003.
+- Added `src/domain/channel-user.ts` normalization helpers:
+  - `normalizePlatform`: trim + lowercase + `^[a-z][a-z0-9._:-]{0,63}$`
+  - `normalizeExternalId`: trim only, non-empty, max 512 characters
+  - `normalizeUserCategory`: trim + `^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`
+  - default category is `unclassified`.
+- Added `CHANNEL_USER_RETENTION_DEFAULTS` and `PLATFORM_IDENTITY_RETENTION_DEFAULTS`, both `operational` / `default` / `agentlink` / `internal`.
+- Updated `migrations/0001_initial.sql` with:
+  - `al_channel_user`
+  - `al_platform_identity`
+  - `UNIQUE(platform, normalized_external_id)`
+  - FK `al_platform_identity.channel_user_id -> al_channel_user(id) ON DELETE CASCADE`
+  - category / platform / external-id CHECKs and retention columns.
+- Wired the model through the control-plane port, in-memory implementation, PostgreSQL statements/repository, PostgreSQL adapter, and HTTP API:
+  - `POST /api/v1/channel-users/upsert`
+  - `PATCH /api/v1/channel-users/{id}/category`
+  - `GET /api/v1/platform-identities/resolve?platform=...&external_id=...`
+- Upsert semantics are intentionally minimal: same `(platform, normalized_external_id)` returns the same `ChannelUser` with `created=false`; different platform or different external ID creates a separate ChannelUser. There is no cross-platform identity merge in this slice.
+- PostgreSQL upsert is transaction-based. It first looks up the unique identity, inserts ChannelUser then PlatformIdentity on first create, and recovers unique-race insert failures by rolling back and re-reading/updating the existing identity to avoid orphan channel users.
+- Test count: 206. Tests cover normalization, retention defaults, in-memory upsert/replay/no-merge/category/resolve behavior, migration unique/FK/CHECK/retention/out-of-scope invariants, PostgreSQL statement envelopes, repository create/update/unique-race/category/resolve behavior, and HTTP 201/200/400/404 snake_case flows.
+- Remaining risks: no live PostgreSQL DSN smoke was run in this environment; real concurrent unique-race behavior is covered only by repository-scripted tests, not by a live database. GroupProfile, Entry/SourceEvent, Session, Memory, MemoryBridge, work/personal interop, historical import, complex permissions, multiple MainUsers, tenants, real platform adapters, and cross-platform identity merge remain intentionally out of scope.

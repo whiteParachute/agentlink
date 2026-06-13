@@ -11,6 +11,8 @@ import {
   TASK_RETENTION_DEFAULTS,
   EVENT_RETENTION_DEFAULTS,
   MAIN_USER_RETENTION_DEFAULTS,
+  CHANNEL_USER_RETENTION_DEFAULTS,
+  PLATFORM_IDENTITY_RETENTION_DEFAULTS,
   isRetentionClass,
   isSensitivity,
   isRetentionIdentifier,
@@ -210,6 +212,15 @@ void test('MAIN_USER_RETENTION_DEFAULTS use operational/default/agentlink/intern
   assert.equal(d.memorySpace, 'default');
   assert.equal(d.sourceSystem, 'agentlink');
   assert.equal(d.sensitivity, 'internal');
+});
+
+void test('AL-M1-004 user identity retention defaults use operational/default/agentlink/internal', () => {
+  for (const d of [CHANNEL_USER_RETENTION_DEFAULTS, PLATFORM_IDENTITY_RETENTION_DEFAULTS]) {
+    assert.equal(d.retentionClass, 'operational');
+    assert.equal(d.memorySpace, 'default');
+    assert.equal(d.sourceSystem, 'agentlink');
+    assert.equal(d.sensitivity, 'internal');
+  }
 });
 
 void test('normalizeRetentionMetadata with MAIN_USER defaults produces consistent output', () => {

@@ -1028,6 +1028,136 @@ WITH upserted AS (
 SELECT row_to_json(p) AS main_user
 FROM upserted p;
 `,
+
+  findPlatformIdentityByNormalized: `
+SELECT row_to_json(cu) AS channel_user, row_to_json(pi) AS platform_identity
+FROM al_platform_identity pi
+JOIN al_channel_user cu ON cu.id = pi.channel_user_id
+WHERE pi.platform = $1
+  AND pi.normalized_external_id = $2;
+`,
+
+  findChannelUserById: `
+SELECT row_to_json(cu) AS channel_user
+FROM al_channel_user cu
+WHERE cu.id = $1;
+`,
+
+  insertChannelUser: `
+WITH inserted AS (
+  INSERT INTO al_channel_user (
+    id,
+    display_name,
+    category,
+    metadata,
+    retention_class,
+    memory_space,
+    source_system,
+    sensitivity,
+    created_at,
+    updated_at
+  ) VALUES (
+    $1,
+    $2,
+    $3,
+    $4::jsonb,
+    $5::al_retention_class,
+    $6,
+    $7,
+    $8::al_sensitivity,
+    $9,
+    $9
+  )
+  RETURNING *
+)
+SELECT row_to_json(cu) AS channel_user
+FROM inserted cu;
+`,
+
+  insertPlatformIdentity: `
+WITH inserted AS (
+  INSERT INTO al_platform_identity (
+    id,
+    channel_user_id,
+    platform,
+    external_id,
+    normalized_external_id,
+    display_name,
+    metadata,
+    retention_class,
+    memory_space,
+    source_system,
+    sensitivity,
+    created_at,
+    updated_at
+  ) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7::jsonb,
+    $8::al_retention_class,
+    $9,
+    $10,
+    $11::al_sensitivity,
+    $12,
+    $12
+  )
+  RETURNING *
+)
+SELECT row_to_json(pi) AS platform_identity
+FROM inserted pi;
+`,
+
+  updateChannelUser: `
+WITH updated AS (
+  UPDATE al_channel_user
+  SET display_name = COALESCE($2, display_name),
+      metadata = COALESCE($3::jsonb, metadata),
+      retention_class = $4::al_retention_class,
+      memory_space = $5,
+      source_system = $6,
+      sensitivity = $7::al_sensitivity,
+      updated_at = $8
+  WHERE id = $1
+  RETURNING *
+)
+SELECT row_to_json(cu) AS channel_user
+FROM updated cu;
+`,
+
+  updatePlatformIdentity: `
+WITH updated AS (
+  UPDATE al_platform_identity
+  SET external_id = $2,
+      normalized_external_id = $3,
+      display_name = COALESCE($4, display_name),
+      metadata = COALESCE($5::jsonb, metadata),
+      retention_class = $6::al_retention_class,
+      memory_space = $7,
+      source_system = $8,
+      sensitivity = $9::al_sensitivity,
+      updated_at = $10
+  WHERE id = $1
+  RETURNING *
+)
+SELECT row_to_json(pi) AS platform_identity
+FROM updated pi;
+`,
+
+  updateChannelUserCategory: `
+WITH updated AS (
+  UPDATE al_channel_user
+  SET category = $2,
+      updated_at = $3
+  WHERE id = $1
+  RETURNING *
+)
+SELECT row_to_json(cu) AS channel_user
+FROM updated cu;
+`,
 } as const;
 
 export type PostgreSqlStatementName = keyof typeof PostgreSqlStatements;

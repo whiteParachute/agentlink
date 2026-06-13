@@ -1,9 +1,11 @@
 import type {
   CapabilityGrantRecord,
+  ChannelUserRecord,
   ControlActionRecord,
   DeviceRecord,
   LeaseRecord,
   MainUserRecord,
+  PlatformIdentityRecord,
   RecoverDecision,
   RecoverableRunRecord,
   RunEventRecord,
@@ -65,4 +67,14 @@ export interface AgentlinkControlPlanePort {
     metadata?: Record<string, unknown>;
     retention?: RetentionMetadataInput;
   }): MaybePromise<{ mainUser: MainUserRecord; created: boolean }>;
+  upsertChannelUser(input: {
+    platform: string;
+    externalId: string;
+    displayName?: string;
+    channelUserMetadata?: Record<string, unknown>;
+    platformIdentityMetadata?: Record<string, unknown>;
+    retention?: RetentionMetadataInput;
+  }): MaybePromise<{ channelUser: ChannelUserRecord; platformIdentity: PlatformIdentityRecord; created: boolean }>;
+  setChannelUserCategory(input: { channelUserId: string; category: string }): MaybePromise<{ channelUser: ChannelUserRecord }>;
+  resolvePlatformIdentity(input: { platform: string; externalId: string }): MaybePromise<{ channelUser: ChannelUserRecord; platformIdentity: PlatformIdentityRecord } | undefined>;
 }

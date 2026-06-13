@@ -812,6 +812,41 @@ function mainUserRow(overrides: Record<string, unknown> = {}): Record<string, un
   };
 }
 
+function channelUserRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: '00000000-0000-4000-8000-000000000901',
+    display_name: 'Channel User',
+    category: 'unclassified',
+    metadata: {},
+    retention_class: 'operational',
+    memory_space: 'default',
+    source_system: 'agentlink',
+    sensitivity: 'internal',
+    created_at: NOW,
+    updated_at: NOW,
+    ...overrides,
+  };
+}
+
+function platformIdentityRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: '00000000-0000-4000-8000-000000000902',
+    channel_user_id: '00000000-0000-4000-8000-000000000901',
+    platform: 'feishu',
+    external_id: 'Open-ID',
+    normalized_external_id: 'Open-ID',
+    display_name: 'Platform User',
+    metadata: {},
+    retention_class: 'operational',
+    memory_space: 'default',
+    source_system: 'agentlink',
+    sensitivity: 'internal',
+    created_at: NOW,
+    updated_at: NOW,
+    ...overrides,
+  };
+}
+
 test('postgres repository maps main user row correctly', async () => {
   const client = new ScriptedSqlClient();
   client.enqueue(one({ main_user: mainUserRow() }));
@@ -912,4 +947,116 @@ test('postgres repository upsertMainUserProfile rejects invalid retention', asyn
     (error: unknown) => error instanceof RetentionMetadataError,
   );
   assert.equal(client.calls.length, 0);
+});
+
+test('postgres repository upsertChannelUser creates channel user and platform identity in one transaction', async () => {
+  const client = new ScriptedSqlClient();
+  client.enqueue(none());
+  client.enqueue(one({ channel_user: channelUserRow({ display_name: 'Alice', metadata: { source: 'chat' } }) }));
+  client.enqueue(one({ platform_identity: platformIdentityRow({ display_name: 'Alice', metadata: { chat: 'oc_1' } }) }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const result = await repo.upsertChannelUser({
+    platform: ' Feishu ',
+    externalId: ' Open-ID ',
+    displayName: 'Alice',
+    channelUserMetadata: { source: 'chat' },
+    platformIdentityMetadata: { chat: 'oc_1' },
+  });
+
+  assert.equal(result.created, true);
+  assert.equal(result.channelUser.id, '00000000-0000-4000-8000-000000000901');
+  assert.equal(result.platformIdentity.platform, 'feishu');
+  assert.equal(result.platformIdentity.normalizedExternalId, 'Open-ID');
+  assert.deepEqual(client.calls.map((call) => call.sql), [
+    'BEGIN',
+    PostgreSqlStatements.findPlatformIdentityByNormalized,
+    PostgreSqlStatements.insertChannelUser,
+    PostgreSqlStatements.insertPlatformIdentity,
+    'COMMIT',
+  ]);
+  assert.equal(client.calls[1]?.params?.[0], 'feishu');
+  assert.equal(client.calls[1]?.params?.[1], 'Open-ID');
+});
+
+test('postgres repository upsertChannelUser reuses existing identity and updates metadata', async () => {
+  const client = new ScriptedSqlClient();
+  client.enqueue(one({ channel_user: channelUserRow(), platform_identity: platformIdentityRow() }));
+  client.enqueue(one({ channel_user: channelUserRow({ display_name: 'Alice Updated', metadata: { source: 'updated' } }) }));
+  client.enqueue(one({ platform_identity: platformIdentityRow({ display_name: 'Alice Updated', metadata: { chat: 'oc_2' } }) }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const result = await repo.upsertChannelUser({
+    platform: 'feishu',
+    externalId: 'Open-ID',
+    displayName: 'Alice Updated',
+    channelUserMetadata: { source: 'updated' },
+    platformIdentityMetadata: { chat: 'oc_2' },
+  });
+
+  assert.equal(result.created, false);
+  assert.equal(result.channelUser.displayName, 'Alice Updated');
+  assert.deepEqual(result.platformIdentity.metadata, { chat: 'oc_2' });
+  assert.deepEqual(client.calls.map((call) => call.sql), [
+    'BEGIN',
+    PostgreSqlStatements.findPlatformIdentityByNormalized,
+    PostgreSqlStatements.updateChannelUser,
+    PostgreSqlStatements.updatePlatformIdentity,
+    'COMMIT',
+  ]);
+});
+
+test('postgres repository recovers identity unique race without orphan channel user', async () => {
+  const unique = Object.assign(new Error('duplicate key'), { code: '23505' });
+  const client = new ScriptedSqlClient();
+  client.enqueue(none());
+  client.enqueue(one({ channel_user: channelUserRow() }));
+  client.enqueue(unique);
+  client.enqueue(one({ channel_user: channelUserRow(), platform_identity: platformIdentityRow() }));
+  client.enqueue(one({ channel_user: channelUserRow({ display_name: 'Race Winner' }) }));
+  client.enqueue(one({ platform_identity: platformIdentityRow({ display_name: 'Race Winner' }) }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const result = await repo.upsertChannelUser({ platform: 'feishu', externalId: 'Open-ID', displayName: 'Race Winner' });
+
+  assert.equal(result.created, false);
+  assert.equal(result.channelUser.displayName, 'Race Winner');
+  assert.deepEqual(client.calls.map((call) => call.sql), [
+    'BEGIN',
+    PostgreSqlStatements.findPlatformIdentityByNormalized,
+    PostgreSqlStatements.insertChannelUser,
+    PostgreSqlStatements.insertPlatformIdentity,
+    'ROLLBACK',
+    'BEGIN',
+    PostgreSqlStatements.findPlatformIdentityByNormalized,
+    PostgreSqlStatements.updateChannelUser,
+    PostgreSqlStatements.updatePlatformIdentity,
+    'COMMIT',
+  ]);
+});
+
+test('postgres repository set category and resolve platform identity', async () => {
+  const categoryClient = new ScriptedSqlClient();
+  categoryClient.enqueue(one({ channel_user: channelUserRow({ category: 'family.child' }) }));
+  const categoryRepo = new PostgreSqlRepository(categoryClient, { now: () => new Date(NOW) });
+  const categorized = await categoryRepo.setChannelUserCategory({
+    channelUserId: '00000000-0000-4000-8000-000000000901',
+    category: ' family.child ',
+  });
+  assert.equal(categorized.channelUser.category, 'family.child');
+  assert.equal(categoryClient.calls[0]?.sql, PostgreSqlStatements.updateChannelUserCategory);
+  assert.equal(categoryClient.calls[0]?.params?.[1], 'family.child');
+
+  const resolveClient = new ScriptedSqlClient();
+  resolveClient.enqueue(one({ channel_user: channelUserRow(), platform_identity: platformIdentityRow() }));
+  const resolveRepo = new PostgreSqlRepository(resolveClient);
+  const resolved = await resolveRepo.resolvePlatformIdentity({ platform: 'Feishu', externalId: ' Open-ID ' });
+  assert.ok(resolved);
+  assert.equal(resolved.platformIdentity.platform, 'feishu');
+  assert.equal(resolveClient.calls[0]?.sql, PostgreSqlStatements.findPlatformIdentityByNormalized);
+
+  const notFoundClient = new ScriptedSqlClient();
+  notFoundClient.enqueue(none());
+  const notFoundRepo = new PostgreSqlRepository(notFoundClient);
+  assert.equal(await notFoundRepo.resolvePlatformIdentity({ platform: 'feishu', externalId: 'missing' }), undefined);
 });

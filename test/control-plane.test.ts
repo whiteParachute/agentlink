@@ -617,3 +617,67 @@ test('main user profile id is always main (singleton)', () => {
   assert.ok(got);
   assert.equal(got.id, 'main');
 });
+
+test('channel user upsert creates and then reuses the same platform identity', () => {
+  const controlPlane = new InMemoryControlPlane({ now: () => new Date('2026-06-13T00:00:00.000Z') });
+  const first = controlPlane.upsertChannelUser({
+    platform: ' Feishu ',
+    externalId: ' OpenID-1 ',
+    displayName: 'Alice',
+    channelUserMetadata: { source: 'chat' },
+    platformIdentityMetadata: { chat: 'oc_1' },
+  });
+  assert.equal(first.created, true);
+  assert.equal(first.channelUser.category, 'unclassified');
+  assert.equal(first.platformIdentity.platform, 'feishu');
+  assert.equal(first.platformIdentity.normalizedExternalId, 'OpenID-1');
+  assert.equal(first.platformIdentity.externalId, 'OpenID-1');
+  assert.equal(first.channelUser.retentionClass, 'operational');
+
+  const replay = controlPlane.upsertChannelUser({
+    platform: 'feishu',
+    externalId: 'OpenID-1',
+    displayName: 'Alice Updated',
+    platformIdentityMetadata: { chat: 'oc_2' },
+  });
+  assert.equal(replay.created, false);
+  assert.equal(replay.channelUser.id, first.channelUser.id);
+  assert.equal(replay.platformIdentity.id, first.platformIdentity.id);
+  assert.equal(replay.channelUser.displayName, 'Alice Updated');
+  assert.deepEqual(replay.platformIdentity.metadata, { chat: 'oc_2' });
+});
+
+test('channel user upsert does not merge different platform or external_id', () => {
+  const controlPlane = new InMemoryControlPlane();
+  const feishu = controlPlane.upsertChannelUser({ platform: 'feishu', externalId: 'same-id' });
+  const telegram = controlPlane.upsertChannelUser({ platform: 'telegram', externalId: 'same-id' });
+  const caseDifferent = controlPlane.upsertChannelUser({ platform: 'feishu', externalId: 'Same-ID' });
+  assert.notEqual(telegram.channelUser.id, feishu.channelUser.id);
+  assert.notEqual(caseDifferent.channelUser.id, feishu.channelUser.id);
+});
+
+test('channel user category can be set and invalid/missing users are rejected', () => {
+  const controlPlane = new InMemoryControlPlane();
+  const created = controlPlane.upsertChannelUser({ platform: 'feishu', externalId: 'open-id' });
+  const categorized = controlPlane.setChannelUserCategory({ channelUserId: created.channelUser.id, category: 'family.child' });
+  assert.equal(categorized.channelUser.category, 'family.child');
+
+  assert.throws(
+    () => controlPlane.setChannelUserCategory({ channelUserId: created.channelUser.id, category: '-bad' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_BAD_REQUEST',
+  );
+  assert.throws(
+    () => controlPlane.setChannelUserCategory({ channelUserId: 'missing', category: 'family' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_CHANNEL_USER_NOT_FOUND',
+  );
+});
+
+test('platform identity resolve returns found records and undefined for not found', () => {
+  const controlPlane = new InMemoryControlPlane();
+  const created = controlPlane.upsertChannelUser({ platform: 'Feishu', externalId: 'Open-ID' });
+  const resolved = controlPlane.resolvePlatformIdentity({ platform: 'feishu', externalId: ' Open-ID ' });
+  assert.ok(resolved);
+  assert.equal(resolved.channelUser.id, created.channelUser.id);
+  assert.equal(resolved.platformIdentity.id, created.platformIdentity.id);
+  assert.equal(controlPlane.resolvePlatformIdentity({ platform: 'feishu', externalId: 'other' }), undefined);
+});

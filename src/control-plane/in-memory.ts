@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import type {
   CapabilityGrantRecord,
+  ChannelUserRecord,
   ControlActionRecord,
   DeviceRecord,
   Domain,
   JsonRecord,
   LeaseRecord,
   MainUserRecord,
+  PlatformIdentityRecord,
   PolicyDecisionRecord,
   RecoverDecision,
   RecoverableRunRecord,
@@ -17,10 +19,18 @@ import type {
   WorkdirAccessMode,
   WorkdirGrantRecord,
 } from '../domain/entities.js';
+import {
+  DEFAULT_USER_CATEGORY,
+  normalizeExternalId,
+  normalizePlatform,
+  normalizeUserCategory,
+} from '../domain/channel-user.js';
 import { evaluateDispatchPolicy } from '../domain/policy.js';
 import {
+  CHANNEL_USER_RETENTION_DEFAULTS,
   EVENT_RETENTION_DEFAULTS,
   MAIN_USER_RETENTION_DEFAULTS,
+  PLATFORM_IDENTITY_RETENTION_DEFAULTS,
   TASK_RETENTION_DEFAULTS,
   normalizeRetentionMetadata,
   withoutRawRetention,
@@ -118,6 +128,9 @@ export class InMemoryControlPlane {
   private readonly taskIdempotency = new Map<string, IdempotencyEntry>();
   private readonly events = new Map<string, Map<number, RunEventRecord>>();
   private mainUser: MainUserRecord | undefined;
+  private readonly channelUsers = new Map<string, ChannelUserRecord>();
+  private readonly platformIdentities = new Map<string, PlatformIdentityRecord>();
+  private readonly platformIdentityUnique = new Map<string, string>();
 
   constructor(options: ControlPlaneOptions = {}) {
     this.now = options.now ?? (() => new Date());
@@ -413,6 +426,113 @@ export class InMemoryControlPlane {
     };
     this.mainUser = updated;
     return { mainUser: updated, created: false };
+  }
+
+  upsertChannelUser(input: {
+    platform: string;
+    externalId: string;
+    displayName?: string;
+    channelUserMetadata?: JsonRecord;
+    platformIdentityMetadata?: JsonRecord;
+    retention?: RetentionMetadataInput;
+  }): { channelUser: ChannelUserRecord; platformIdentity: PlatformIdentityRecord; created: boolean } {
+    const platform = normalizePlatform(input.platform);
+    const externalId = normalizeExternalId(input.externalId);
+    const uniqueKey = platformIdentityKey(platform, externalId);
+    const displayName = normalizeOptionalDisplayName(input.displayName);
+    const now = this.timestamp();
+    const existingIdentityId = this.platformIdentityUnique.get(uniqueKey);
+    if (existingIdentityId) {
+      const existingIdentity = this.mustGetPlatformIdentity(existingIdentityId);
+      const existingChannelUser = this.mustGetChannelUser(existingIdentity.channelUserId);
+      const channelRetention = input.retention
+        ? normalizeRetentionMetadata(input.retention, CHANNEL_USER_RETENTION_DEFAULTS)
+        : recordRetention(existingChannelUser);
+      const identityRetention = input.retention
+        ? normalizeRetentionMetadata(input.retention, PLATFORM_IDENTITY_RETENTION_DEFAULTS)
+        : recordRetention(existingIdentity);
+      const updatedChannelUser: ChannelUserRecord = {
+        ...existingChannelUser,
+        ...(displayName ? { displayName } : {}),
+        ...(input.channelUserMetadata ? { metadata: input.channelUserMetadata } : {}),
+        retentionClass: channelRetention.retentionClass,
+        memorySpace: channelRetention.memorySpace,
+        sourceSystem: channelRetention.sourceSystem,
+        sensitivity: channelRetention.sensitivity,
+        updatedAt: now,
+      };
+      const updatedIdentity: PlatformIdentityRecord = {
+        ...existingIdentity,
+        externalId,
+        normalizedExternalId: externalId,
+        ...(displayName ? { displayName } : {}),
+        ...(input.platformIdentityMetadata ? { metadata: input.platformIdentityMetadata } : {}),
+        retentionClass: identityRetention.retentionClass,
+        memorySpace: identityRetention.memorySpace,
+        sourceSystem: identityRetention.sourceSystem,
+        sensitivity: identityRetention.sensitivity,
+        updatedAt: now,
+      };
+      this.channelUsers.set(updatedChannelUser.id, updatedChannelUser);
+      this.platformIdentities.set(updatedIdentity.id, updatedIdentity);
+      return { channelUser: updatedChannelUser, platformIdentity: updatedIdentity, created: false };
+    }
+
+    const channelRetention = normalizeRetentionMetadata(input.retention, CHANNEL_USER_RETENTION_DEFAULTS);
+    const identityRetention = normalizeRetentionMetadata(input.retention, PLATFORM_IDENTITY_RETENTION_DEFAULTS);
+    const channelUser: ChannelUserRecord = {
+      id: randomUUID(),
+      displayName: displayName ?? 'Channel User',
+      category: DEFAULT_USER_CATEGORY,
+      metadata: input.channelUserMetadata ?? {},
+      retentionClass: channelRetention.retentionClass,
+      memorySpace: channelRetention.memorySpace,
+      sourceSystem: channelRetention.sourceSystem,
+      sensitivity: channelRetention.sensitivity,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const platformIdentity: PlatformIdentityRecord = {
+      id: randomUUID(),
+      channelUserId: channelUser.id,
+      platform,
+      externalId,
+      normalizedExternalId: externalId,
+      displayName: displayName ?? 'Platform User',
+      metadata: input.platformIdentityMetadata ?? {},
+      retentionClass: identityRetention.retentionClass,
+      memorySpace: identityRetention.memorySpace,
+      sourceSystem: identityRetention.sourceSystem,
+      sensitivity: identityRetention.sensitivity,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.channelUsers.set(channelUser.id, channelUser);
+    this.platformIdentities.set(platformIdentity.id, platformIdentity);
+    this.platformIdentityUnique.set(uniqueKey, platformIdentity.id);
+    return { channelUser, platformIdentity, created: true };
+  }
+
+  setChannelUserCategory(input: { channelUserId: string; category: string }): { channelUser: ChannelUserRecord } {
+    const channelUser = this.channelUsers.get(input.channelUserId);
+    if (!channelUser) throw new AgentlinkError(404, 'AL_CHANNEL_USER_NOT_FOUND', 'Channel user not found');
+    const updated: ChannelUserRecord = {
+      ...channelUser,
+      category: normalizeUserCategory(input.category),
+      updatedAt: this.timestamp(),
+    };
+    this.channelUsers.set(updated.id, updated);
+    return { channelUser: updated };
+  }
+
+  resolvePlatformIdentity(input: { platform: string; externalId: string }): { channelUser: ChannelUserRecord; platformIdentity: PlatformIdentityRecord } | undefined {
+    const platform = normalizePlatform(input.platform);
+    const externalId = normalizeExternalId(input.externalId);
+    const identityId = this.platformIdentityUnique.get(platformIdentityKey(platform, externalId));
+    if (!identityId) return undefined;
+    const platformIdentity = this.mustGetPlatformIdentity(identityId);
+    const channelUser = this.mustGetChannelUser(platformIdentity.channelUserId);
+    return { channelUser, platformIdentity };
   }
 
   revokeDevice(deviceId: string, reason = 'device_revoked'): { device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] } {
@@ -810,6 +930,18 @@ export class InMemoryControlPlane {
     return runner;
   }
 
+  private mustGetChannelUser(channelUserId: string): ChannelUserRecord {
+    const channelUser = this.channelUsers.get(channelUserId);
+    if (!channelUser) throw new AgentlinkError(404, 'AL_CHANNEL_USER_NOT_FOUND', 'Channel user not found');
+    return channelUser;
+  }
+
+  private mustGetPlatformIdentity(platformIdentityId: string): PlatformIdentityRecord {
+    const platformIdentity = this.platformIdentities.get(platformIdentityId);
+    if (!platformIdentity) throw new AgentlinkError(404, 'AL_PLATFORM_IDENTITY_NOT_FOUND', 'Platform identity not found');
+    return platformIdentity;
+  }
+
   private findActiveLease(runId: string): LeaseRecord | undefined {
     return [...this.leases.values()].find((lease) => lease.runId === runId && isActiveLeaseStatus(lease.status));
   }
@@ -1035,6 +1167,31 @@ function toExternalPolicyErrorCode(code: string | undefined): 'AL_POLICY_DENIED'
   if (code === 'AL_WORKDIR_DENIED') return 'AL_WORKDIR_DENIED';
   if (code === 'AL_CAPABILITY_DENIED' || code === 'AL_CAPABILITY_UNDECLARED' || code === 'AL_CAPABILITY_UNSUPPORTED') return 'AL_CAPABILITY_DENIED';
   return 'AL_POLICY_DENIED';
+}
+
+function platformIdentityKey(platform: string, normalizedExternalId: string): string {
+  return `${platform}:${normalizedExternalId}`;
+}
+
+function normalizeOptionalDisplayName(displayName: string | undefined): string | undefined {
+  if (displayName === undefined) return undefined;
+  const normalized = displayName.trim();
+  if (normalized.length === 0) throw new AgentlinkError(400, 'AL_BAD_REQUEST', 'display_name must be a non-empty string');
+  return normalized;
+}
+
+function recordRetention(record: {
+  retentionClass: RetentionMetadata['retentionClass'];
+  memorySpace: string;
+  sourceSystem: string;
+  sensitivity: RetentionMetadata['sensitivity'];
+}): RetentionMetadata {
+  return {
+    retentionClass: record.retentionClass,
+    memorySpace: record.memorySpace,
+    sourceSystem: record.sourceSystem,
+    sensitivity: record.sensitivity,
+  };
 }
 
 function hashSecret(secret: string): string {

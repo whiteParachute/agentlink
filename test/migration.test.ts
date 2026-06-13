@@ -122,9 +122,36 @@ test('initial migration gives main user profile AL-M1-002 retention boundary col
   assert.match(sql, /CREATE TABLE al_main_user_profile[\s\S]*sensitivity al_sensitivity NOT NULL DEFAULT 'internal'/i);
 });
 
-test('initial migration keeps AL-M1-003 out-of-scope identity and memory tables absent', () => {
+test('initial migration adds AL-M1-004 channel user and platform identity tables', () => {
   const sql = loadInitialMigration();
-  for (const table of ['al_channel_user', 'al_platform_identity', 'al_group_profile', 'al_entry', 'al_source_event', 'al_session', 'al_memory']) {
+  assert.match(sql, /CREATE TABLE al_channel_user/i);
+  assert.match(sql, /display_name text NOT NULL DEFAULT 'Channel User'/i);
+  assert.match(sql, /category text NOT NULL DEFAULT 'unclassified' CHECK \(category ~ '\^\[A-Za-z0-9\]\[A-Za-z0-9._:-\]\{0,63\}\$'\)/i);
+  assert.match(sql, /metadata jsonb NOT NULL DEFAULT '\{\}'::jsonb CHECK \(jsonb_typeof\(metadata\) = 'object'\)/i);
+  assert.match(sql, /CREATE INDEX idx_al_channel_user_category/i);
+
+  assert.match(sql, /CREATE TABLE al_platform_identity/i);
+  assert.match(sql, /channel_user_id uuid NOT NULL REFERENCES al_channel_user\(id\) ON DELETE CASCADE/i);
+  assert.match(sql, /platform text NOT NULL CHECK \(platform ~ '\^\[a-z\]\[a-z0-9._:-\]\{0,63\}\$'\)/i);
+  assert.match(sql, /external_id text NOT NULL CHECK \(length\(external_id\) BETWEEN 1 AND 512\)/i);
+  assert.match(sql, /normalized_external_id text NOT NULL CHECK \(length\(normalized_external_id\) BETWEEN 1 AND 512\)/i);
+  assert.match(sql, /UNIQUE \(platform, normalized_external_id\)/i);
+  assert.match(sql, /CREATE INDEX idx_al_platform_identity_channel_user/i);
+});
+
+test('initial migration gives AL-M1-004 identity tables retention boundary columns', () => {
+  const sql = loadInitialMigration();
+  for (const table of ['al_channel_user', 'al_platform_identity']) {
+    assert.match(sql, new RegExp(`CREATE TABLE ${table}[\\s\\S]*retention_class al_retention_class NOT NULL DEFAULT 'operational'`, 'i'));
+    assert.match(sql, new RegExp(`CREATE TABLE ${table}[\\s\\S]*memory_space text NOT NULL DEFAULT 'default' CHECK \\(memory_space ~`, 'i'));
+    assert.match(sql, new RegExp(`CREATE TABLE ${table}[\\s\\S]*source_system text NOT NULL DEFAULT 'agentlink' CHECK \\(source_system ~`, 'i'));
+    assert.match(sql, new RegExp(`CREATE TABLE ${table}[\\s\\S]*sensitivity al_sensitivity NOT NULL DEFAULT 'internal'`, 'i'));
+  }
+});
+
+test('initial migration keeps AL-M1-004 out-of-scope group/event/session/memory tables absent', () => {
+  const sql = loadInitialMigration();
+  for (const table of ['al_group_profile', 'al_entry', 'al_source_event', 'al_session', 'al_memory', 'al_memory_bridge']) {
     assert.doesNotMatch(sql, new RegExp(`CREATE TABLE ${table}`, 'i'));
   }
 });
