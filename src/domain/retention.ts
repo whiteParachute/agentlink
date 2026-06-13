@@ -155,6 +155,13 @@ export const PLATFORM_IDENTITY_RETENTION_DEFAULTS: RetentionDefaults = {
   sourceSystem: DEFAULT_SOURCE_SYSTEM,
 };
 
+export const GROUP_PROFILE_RETENTION_DEFAULTS: RetentionDefaults = {
+  retentionClass: 'operational',
+  sensitivity: 'internal',
+  memorySpace: DEFAULT_MEMORY_SPACE,
+  sourceSystem: DEFAULT_SOURCE_SYSTEM,
+};
+
 
 // Strip raw retention from an input object so idempotency signatures only
 // depend on normalized retention metadata. This ensures that omitting

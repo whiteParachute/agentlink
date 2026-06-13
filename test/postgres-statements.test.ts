@@ -320,3 +320,39 @@ test('channel user update statements preserve repository-controlled retention an
   assert.match(PostgreSqlStatements.updateChannelUserCategory, /SET category = \$2/i);
   assert.match(PostgreSqlStatements.updateChannelUserCategory, /WHERE id = \$1/i);
 });
+
+test('group profile statements use explicit row_to_json envelope and natural key lookup', () => {
+  assert.match(PostgreSqlStatements.findGroupProfileById, /FROM al_group_profile gp/i);
+  assert.match(PostgreSqlStatements.findGroupProfileById, /gp\.id = \$1/i);
+  assert.match(PostgreSqlStatements.findGroupProfileById, /row_to_json\(gp\) AS group_profile/i);
+
+  assert.match(PostgreSqlStatements.findGroupProfileByNaturalKey, /FROM al_group_profile gp/i);
+  assert.match(PostgreSqlStatements.findGroupProfileByNaturalKey, /gp\.platform = \$1/i);
+  assert.match(PostgreSqlStatements.findGroupProfileByNaturalKey, /gp\.normalized_external_group_id = \$2/i);
+  assert.match(PostgreSqlStatements.findGroupProfileByNaturalKey, /row_to_json\(gp\) AS group_profile/i);
+
+  assert.match(PostgreSqlStatements.insertGroupProfile, /INSERT INTO al_group_profile/i);
+  assert.match(PostgreSqlStatements.insertGroupProfile, /normalized_external_group_id/i);
+  assert.match(PostgreSqlStatements.insertGroupProfile, /default_reply_mode/i);
+  assert.match(PostgreSqlStatements.insertGroupProfile, /memory_scope/i);
+  assert.match(PostgreSqlStatements.insertGroupProfile, /RETURNING \*/i);
+  assert.match(PostgreSqlStatements.insertGroupProfile, /SELECT row_to_json\(gp\) AS group_profile/i);
+});
+
+test('group profile update statements preserve repository-controlled defaults and retention', () => {
+  assert.match(PostgreSqlStatements.updateGroupProfile, /UPDATE al_group_profile/i);
+  assert.match(PostgreSqlStatements.updateGroupProfile, /external_group_id = \$2/i);
+  assert.match(PostgreSqlStatements.updateGroupProfile, /normalized_external_group_id = \$3/i);
+  assert.match(PostgreSqlStatements.updateGroupProfile, /display_name = COALESCE\(\$4, display_name\)/i);
+  assert.match(PostgreSqlStatements.updateGroupProfile, /default_reply_mode = COALESCE\(\$7, default_reply_mode\)/i);
+  assert.match(PostgreSqlStatements.updateGroupProfile, /metadata = COALESCE\(\$10::jsonb, metadata\)/i);
+  assert.match(PostgreSqlStatements.updateGroupProfile, /retention_class = \$11::al_retention_class/i);
+  assert.match(PostgreSqlStatements.updateGroupProfile, /SELECT row_to_json\(gp\) AS group_profile/i);
+
+  assert.match(PostgreSqlStatements.updateGroupProfileDefaults, /UPDATE al_group_profile/i);
+  assert.match(PostgreSqlStatements.updateGroupProfileDefaults, /default_reply_mode = COALESCE\(\$2, default_reply_mode\)/i);
+  assert.match(PostgreSqlStatements.updateGroupProfileDefaults, /context_scope = COALESCE\(\$3, context_scope\)/i);
+  assert.match(PostgreSqlStatements.updateGroupProfileDefaults, /memory_scope = COALESCE\(\$4, memory_scope\)/i);
+  assert.match(PostgreSqlStatements.updateGroupProfileDefaults, /tone = COALESCE\(\$5, tone\)/i);
+  assert.match(PostgreSqlStatements.updateGroupProfileDefaults, /WHERE id = \$1/i);
+});

@@ -681,3 +681,88 @@ test('platform identity resolve returns found records and undefined for not foun
   assert.equal(resolved.platformIdentity.id, created.platformIdentity.id);
   assert.equal(controlPlane.resolvePlatformIdentity({ platform: 'feishu', externalId: 'other' }), undefined);
 });
+
+test('group profile upsert creates defaults and reuses the same natural key', () => {
+  const controlPlane = new InMemoryControlPlane({ now: () => new Date('2026-06-13T00:00:00.000Z') });
+  const first = controlPlane.upsertGroupProfile({
+    platform: ' Feishu ',
+    externalGroupId: ' OC-1 ',
+    displayName: '研发群',
+    metadata: { source: 'chat' },
+  });
+  assert.equal(first.created, true);
+  assert.equal(first.groupProfile.platform, 'feishu');
+  assert.equal(first.groupProfile.externalGroupId, 'OC-1');
+  assert.equal(first.groupProfile.normalizedExternalGroupId, 'OC-1');
+  assert.equal(first.groupProfile.displayName, '研发群');
+  assert.equal(first.groupProfile.groupType, 'general');
+  assert.equal(first.groupProfile.tone, 'neutral');
+  assert.equal(first.groupProfile.defaultReplyMode, 'thread');
+  assert.equal(first.groupProfile.contextScope, 'group');
+  assert.equal(first.groupProfile.memoryScope, 'group');
+  assert.equal(first.groupProfile.retentionClass, 'operational');
+  assert.equal(first.groupProfile.memorySpace, 'default');
+  assert.equal(first.groupProfile.sourceSystem, 'agentlink');
+  assert.equal(first.groupProfile.sensitivity, 'internal');
+
+  const replay = controlPlane.upsertGroupProfile({
+    platform: 'feishu',
+    externalGroupId: 'OC-1',
+    displayName: '研发群 updated',
+    groupType: 'team',
+    tone: 'formal',
+    defaultReplyMode: 'dialog',
+    contextScope: 'group.ops',
+    memoryScope: 'group.ops',
+    metadata: { source: 'updated' },
+  });
+  assert.equal(replay.created, false);
+  assert.equal(replay.groupProfile.id, first.groupProfile.id);
+  assert.equal(replay.groupProfile.displayName, '研发群 updated');
+  assert.equal(replay.groupProfile.groupType, 'team');
+  assert.equal(replay.groupProfile.tone, 'formal');
+  assert.equal(replay.groupProfile.defaultReplyMode, 'dialog');
+  assert.equal(replay.groupProfile.contextScope, 'group.ops');
+  assert.deepEqual(replay.groupProfile.metadata, { source: 'updated' });
+});
+
+test('group profile upsert does not merge different platform or external_group_id', () => {
+  const controlPlane = new InMemoryControlPlane();
+  const feishu = controlPlane.upsertGroupProfile({ platform: 'feishu', externalGroupId: 'same-id' });
+  const telegram = controlPlane.upsertGroupProfile({ platform: 'telegram', externalGroupId: 'same-id' });
+  const caseDifferent = controlPlane.upsertGroupProfile({ platform: 'feishu', externalGroupId: 'Same-ID' });
+  assert.notEqual(telegram.groupProfile.id, feishu.groupProfile.id);
+  assert.notEqual(caseDifferent.groupProfile.id, feishu.groupProfile.id);
+});
+
+test('group profile get, resolve, and default updates work with validation', () => {
+  const controlPlane = new InMemoryControlPlane();
+  const created = controlPlane.upsertGroupProfile({ platform: 'Feishu', externalGroupId: ' OC-1 ' });
+  assert.equal(controlPlane.getGroupProfile(created.groupProfile.id)?.id, created.groupProfile.id);
+
+  const resolved = controlPlane.resolveGroupProfile({ platform: 'feishu', externalGroupId: 'OC-1' });
+  assert.ok(resolved);
+  assert.equal(resolved.id, created.groupProfile.id);
+  assert.equal(controlPlane.resolveGroupProfile({ platform: 'feishu', externalGroupId: 'missing' }), undefined);
+
+  const updated = controlPlane.setGroupProfileDefaults({
+    groupProfileId: created.groupProfile.id,
+    defaultReplyMode: 'dialog',
+    contextScope: 'group.support',
+    memoryScope: 'group.support',
+    tone: 'friendly',
+  });
+  assert.equal(updated.groupProfile.defaultReplyMode, 'dialog');
+  assert.equal(updated.groupProfile.contextScope, 'group.support');
+  assert.equal(updated.groupProfile.memoryScope, 'group.support');
+  assert.equal(updated.groupProfile.tone, 'friendly');
+
+  assert.throws(
+    () => controlPlane.setGroupProfileDefaults({ groupProfileId: created.groupProfile.id, defaultReplyMode: 'stream' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_BAD_REQUEST',
+  );
+  assert.throws(
+    () => controlPlane.setGroupProfileDefaults({ groupProfileId: 'missing', defaultReplyMode: 'thread' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_GROUP_PROFILE_NOT_FOUND',
+  );
+});

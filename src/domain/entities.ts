@@ -253,3 +253,35 @@ export interface PlatformIdentityRecord {
   createdAt: string;
   updatedAt: string;
 }
+
+export type ReplyMode = 'thread' | 'dialog';
+
+export interface GroupProfileRecord {
+  id: string;
+  platform: string;
+  externalGroupId: string;
+  normalizedExternalGroupId: string;
+  displayName: string;
+  groupType: string;
+  tone: string;
+  defaultReplyMode: ReplyMode;
+  contextScope: string;
+  memoryScope: string;
+  metadata: JsonRecord;
+  retentionClass: RetentionClass;
+  memorySpace: string;
+  sourceSystem: string;
+  sensitivity: Sensitivity;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GroupContextProjection {
+  groupProfile: GroupProfileRecord;
+  platform: string;
+  externalGroupId: string;
+  defaultReplyMode: ReplyMode;
+  contextScope: string;
+  memoryScope: string;
+  tone: string;
+}

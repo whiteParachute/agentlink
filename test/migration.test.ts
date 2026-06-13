@@ -149,9 +149,39 @@ test('initial migration gives AL-M1-004 identity tables retention boundary colum
   }
 });
 
-test('initial migration keeps AL-M1-004 out-of-scope group/event/session/memory tables absent', () => {
+test('initial migration adds AL-M1-005 group profile table only', () => {
   const sql = loadInitialMigration();
-  for (const table of ['al_group_profile', 'al_entry', 'al_source_event', 'al_session', 'al_memory', 'al_memory_bridge']) {
+  assert.match(sql, /CREATE TABLE al_group_profile/i);
+  assert.match(sql, /platform text NOT NULL CHECK \(platform ~ '\^\[a-z\]\[a-z0-9._:-\]\{0,63\}\$'\)/i);
+  assert.match(sql, /external_group_id text NOT NULL CHECK \(length\(btrim\(external_group_id\)\) BETWEEN 1 AND 512\)/i);
+  assert.match(sql, /normalized_external_group_id text NOT NULL CHECK \(length\(btrim\(normalized_external_group_id\)\) BETWEEN 1 AND 512\)/i);
+  assert.match(sql, /display_name text NOT NULL DEFAULT 'Group'/i);
+  assert.match(sql, /group_type text NOT NULL DEFAULT 'general' CHECK \(group_type ~ '\^\[A-Za-z0-9\]\[A-Za-z0-9._:-\]\{0,63\}\$'\)/i);
+  assert.match(sql, /tone text NOT NULL DEFAULT 'neutral' CHECK \(tone ~ '\^\[A-Za-z0-9\]\[A-Za-z0-9._:-\]\{0,63\}\$'\)/i);
+  assert.match(sql, /default_reply_mode text NOT NULL DEFAULT 'thread' CHECK \(default_reply_mode IN \('thread', 'dialog'\)\)/i);
+  assert.match(sql, /context_scope text NOT NULL DEFAULT 'group' CHECK \(context_scope ~ '\^\[A-Za-z0-9\]\[A-Za-z0-9._:-\]\{0,127\}\$'\)/i);
+  assert.match(sql, /memory_scope text NOT NULL DEFAULT 'group' CHECK \(memory_scope ~ '\^\[A-Za-z0-9\]\[A-Za-z0-9._:-\]\{0,127\}\$'\)/i);
+  assert.match(sql, /metadata jsonb NOT NULL DEFAULT '\{\}'::jsonb CHECK \(jsonb_typeof\(metadata\) = 'object'\)/i);
+  assert.match(sql, /UNIQUE \(platform, normalized_external_group_id\)/i);
+  assert.match(sql, /CREATE INDEX idx_al_group_profile_group_type/i);
+  assert.match(sql, /CREATE INDEX idx_al_group_profile_retention ON al_group_profile\(memory_space, retention_class\)/i);
+  const groupTableSql = sql.match(/CREATE TABLE al_group_profile \([\s\S]*?\n\);/i)?.[0] ?? '';
+  assert.notEqual(groupTableSql, '');
+  assert.doesNotMatch(groupTableSql, /main_user_id/i);
+  assert.doesNotMatch(groupTableSql, /tenant_id/i);
+});
+
+test('initial migration gives AL-M1-005 group profile retention boundary columns', () => {
+  const sql = loadInitialMigration();
+  assert.match(sql, /CREATE TABLE al_group_profile[\s\S]*retention_class al_retention_class NOT NULL DEFAULT 'operational'/i);
+  assert.match(sql, /CREATE TABLE al_group_profile[\s\S]*memory_space text NOT NULL DEFAULT 'default' CHECK \(memory_space ~/i);
+  assert.match(sql, /CREATE TABLE al_group_profile[\s\S]*source_system text NOT NULL DEFAULT 'agentlink' CHECK \(source_system ~/i);
+  assert.match(sql, /CREATE TABLE al_group_profile[\s\S]*sensitivity al_sensitivity NOT NULL DEFAULT 'internal'/i);
+});
+
+test('initial migration keeps AL-M1-005 out-of-scope entry/session/memory tables absent', () => {
+  const sql = loadInitialMigration();
+  for (const table of ['al_entry', 'al_source_event', 'al_session', 'al_memory', 'al_memory_bridge']) {
     assert.doesNotMatch(sql, new RegExp(`CREATE TABLE ${table}`, 'i'));
   }
 });

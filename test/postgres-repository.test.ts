@@ -847,6 +847,29 @@ function platformIdentityRow(overrides: Record<string, unknown> = {}): Record<st
   };
 }
 
+function groupProfileRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: '00000000-0000-4000-8000-000000000903',
+    platform: 'feishu',
+    external_group_id: 'OC-1',
+    normalized_external_group_id: 'OC-1',
+    display_name: 'Group',
+    group_type: 'general',
+    tone: 'neutral',
+    default_reply_mode: 'thread',
+    context_scope: 'group',
+    memory_scope: 'group',
+    metadata: {},
+    retention_class: 'operational',
+    memory_space: 'default',
+    source_system: 'agentlink',
+    sensitivity: 'internal',
+    created_at: NOW,
+    updated_at: NOW,
+    ...overrides,
+  };
+}
+
 test('postgres repository maps main user row correctly', async () => {
   const client = new ScriptedSqlClient();
   client.enqueue(one({ main_user: mainUserRow() }));
@@ -1059,4 +1082,143 @@ test('postgres repository set category and resolve platform identity', async () 
   notFoundClient.enqueue(none());
   const notFoundRepo = new PostgreSqlRepository(notFoundClient);
   assert.equal(await notFoundRepo.resolvePlatformIdentity({ platform: 'feishu', externalId: 'missing' }), undefined);
+});
+
+test('postgres repository upsertGroupProfile creates group profile in one transaction', async () => {
+  const client = new ScriptedSqlClient();
+  client.enqueue(none());
+  client.enqueue(one({ group_profile: groupProfileRow({ display_name: '研发群', metadata: { source: 'chat' } }) }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const result = await repo.upsertGroupProfile({
+    platform: ' Feishu ',
+    externalGroupId: ' OC-1 ',
+    displayName: '研发群',
+    metadata: { source: 'chat' },
+  });
+
+  assert.equal(result.created, true);
+  assert.equal(result.groupProfile.platform, 'feishu');
+  assert.equal(result.groupProfile.normalizedExternalGroupId, 'OC-1');
+  assert.equal(result.groupProfile.displayName, '研发群');
+  assert.equal(result.groupProfile.defaultReplyMode, 'thread');
+  assert.equal(result.groupProfile.contextScope, 'group');
+  assert.equal(result.groupProfile.memoryScope, 'group');
+  assert.deepEqual(client.calls.map((call) => call.sql), [
+    'BEGIN',
+    PostgreSqlStatements.findGroupProfileByNaturalKey,
+    PostgreSqlStatements.insertGroupProfile,
+    'COMMIT',
+  ]);
+  assert.equal(client.calls[1]?.params?.[0], 'feishu');
+  assert.equal(client.calls[1]?.params?.[1], 'OC-1');
+  assert.equal(client.calls[2]?.params?.[7], 'thread');
+  assert.equal(client.calls[2]?.params?.[8], 'group');
+  assert.equal(client.calls[2]?.params?.[9], 'group');
+});
+
+test('postgres repository upsertGroupProfile reuses existing natural key and updates defaults', async () => {
+  const client = new ScriptedSqlClient();
+  client.enqueue(one({ group_profile: groupProfileRow() }));
+  client.enqueue(one({ group_profile: groupProfileRow({
+    display_name: '研发群 updated',
+    group_type: 'team',
+    tone: 'formal',
+    default_reply_mode: 'dialog',
+    context_scope: 'group.ops',
+    memory_scope: 'group.ops',
+    metadata: { source: 'updated' },
+  }) }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const result = await repo.upsertGroupProfile({
+    platform: 'feishu',
+    externalGroupId: 'OC-1',
+    displayName: '研发群 updated',
+    groupType: 'team',
+    tone: 'formal',
+    defaultReplyMode: 'dialog',
+    contextScope: 'group.ops',
+    memoryScope: 'group.ops',
+    metadata: { source: 'updated' },
+  });
+
+  assert.equal(result.created, false);
+  assert.equal(result.groupProfile.id, '00000000-0000-4000-8000-000000000903');
+  assert.equal(result.groupProfile.defaultReplyMode, 'dialog');
+  assert.equal(result.groupProfile.contextScope, 'group.ops');
+  assert.deepEqual(client.calls.map((call) => call.sql), [
+    'BEGIN',
+    PostgreSqlStatements.findGroupProfileByNaturalKey,
+    PostgreSqlStatements.updateGroupProfile,
+    'COMMIT',
+  ]);
+  assert.equal(client.calls[2]?.params?.[6], 'dialog');
+});
+
+test('postgres repository recovers group profile unique race by re-reading existing profile', async () => {
+  const unique = Object.assign(new Error('duplicate key'), { code: '23505' });
+  const client = new ScriptedSqlClient();
+  client.enqueue(none());
+  client.enqueue(unique);
+  client.enqueue(one({ group_profile: groupProfileRow() }));
+  client.enqueue(one({ group_profile: groupProfileRow({ display_name: 'Race Winner' }) }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const result = await repo.upsertGroupProfile({ platform: 'feishu', externalGroupId: 'OC-1', displayName: 'Race Winner' });
+
+  assert.equal(result.created, false);
+  assert.equal(result.groupProfile.displayName, 'Race Winner');
+  assert.deepEqual(client.calls.map((call) => call.sql), [
+    'BEGIN',
+    PostgreSqlStatements.findGroupProfileByNaturalKey,
+    PostgreSqlStatements.insertGroupProfile,
+    'ROLLBACK',
+    'BEGIN',
+    PostgreSqlStatements.findGroupProfileByNaturalKey,
+    PostgreSqlStatements.updateGroupProfile,
+    'COMMIT',
+  ]);
+});
+
+test('postgres repository get, resolve, set defaults, and not-found behavior for group profile', async () => {
+  const getClient = new ScriptedSqlClient();
+  getClient.enqueue(one({ group_profile: groupProfileRow({ display_name: '研发群' }) }));
+  const getRepo = new PostgreSqlRepository(getClient);
+  const got = await getRepo.getGroupProfile('00000000-0000-4000-8000-000000000903');
+  assert.ok(got);
+  assert.equal(got.displayName, '研发群');
+  assert.equal(getClient.calls[0]?.sql, PostgreSqlStatements.findGroupProfileById);
+
+  const resolveClient = new ScriptedSqlClient();
+  resolveClient.enqueue(one({ group_profile: groupProfileRow() }));
+  const resolveRepo = new PostgreSqlRepository(resolveClient);
+  const resolved = await resolveRepo.resolveGroupProfile({ platform: ' Feishu ', externalGroupId: ' OC-1 ' });
+  assert.ok(resolved);
+  assert.equal(resolved.platform, 'feishu');
+  assert.equal(resolveClient.calls[0]?.sql, PostgreSqlStatements.findGroupProfileByNaturalKey);
+
+  const defaultsClient = new ScriptedSqlClient();
+  defaultsClient.enqueue(one({ group_profile: groupProfileRow({ default_reply_mode: 'dialog', context_scope: 'group.support', memory_scope: 'group.support', tone: 'friendly' }) }));
+  const defaultsRepo = new PostgreSqlRepository(defaultsClient, { now: () => new Date(NOW) });
+  const updated = await defaultsRepo.setGroupProfileDefaults({
+    groupProfileId: '00000000-0000-4000-8000-000000000903',
+    defaultReplyMode: 'dialog',
+    contextScope: ' group.support ',
+    memoryScope: 'group.support',
+    tone: 'friendly',
+  });
+  assert.equal(updated.groupProfile.defaultReplyMode, 'dialog');
+  assert.equal(updated.groupProfile.contextScope, 'group.support');
+  assert.equal(defaultsClient.calls[0]?.sql, PostgreSqlStatements.updateGroupProfileDefaults);
+  assert.equal(defaultsClient.calls[0]?.params?.[1], 'dialog');
+  assert.equal(defaultsClient.calls[0]?.params?.[2], 'group.support');
+
+  const notFoundClient = new ScriptedSqlClient();
+  notFoundClient.enqueue(none());
+  const notFoundRepo = new PostgreSqlRepository(notFoundClient);
+  await assert.rejects(
+    async () => notFoundRepo.setGroupProfileDefaults({ groupProfileId: 'missing', defaultReplyMode: 'thread' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_GROUP_PROFILE_NOT_FOUND',
+  );
 });

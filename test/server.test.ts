@@ -1087,3 +1087,137 @@ test('HTTP channel user upsert does not merge different platform or external_id'
     assert.notEqual(cb.channel_user.id, ab.channel_user.id);
   });
 });
+
+test('HTTP group profile upsert repeats into same profile and returns snake_case DTOs', async () => {
+  await withServer(async (baseUrl) => {
+    const first = await postJson(baseUrl, '/api/v1/group-profiles', {
+      platform: ' Feishu ',
+      external_group_id: ' OC-1 ',
+      display_name: '研发群',
+      metadata: { source: 'chat' },
+    });
+    assert.equal(first.status, 201);
+    const firstBody = (await first.json()) as {
+      created: boolean;
+      group_profile: {
+        id: string;
+        platform: string;
+        external_group_id: string;
+        normalized_external_group_id: string;
+        display_name: string;
+        group_type: string;
+        tone: string;
+        default_reply_mode: string;
+        context_scope: string;
+        memory_scope: string;
+        metadata: Record<string, unknown>;
+        retention: Record<string, string>;
+        displayName?: string;
+      };
+    };
+    assert.equal(firstBody.created, true);
+    assert.equal(firstBody.group_profile.platform, 'feishu');
+    assert.equal(firstBody.group_profile.external_group_id, 'OC-1');
+    assert.equal(firstBody.group_profile.normalized_external_group_id, 'OC-1');
+    assert.equal(firstBody.group_profile.display_name, '研发群');
+    assert.equal(firstBody.group_profile.displayName, undefined);
+    assert.equal(firstBody.group_profile.group_type, 'general');
+    assert.equal(firstBody.group_profile.tone, 'neutral');
+    assert.equal(firstBody.group_profile.default_reply_mode, 'thread');
+    assert.equal(firstBody.group_profile.context_scope, 'group');
+    assert.equal(firstBody.group_profile.memory_scope, 'group');
+    assert.equal(firstBody.group_profile.retention.retention_class, 'operational');
+
+    const replay = await postJson(baseUrl, '/api/v1/group-profiles', {
+      platform: 'feishu',
+      external_group_id: 'OC-1',
+      display_name: '研发群 updated',
+      group_type: 'team',
+      tone: 'formal',
+      default_reply_mode: 'dialog',
+      context_scope: 'group.ops',
+      memory_scope: 'group.ops',
+      metadata: { source: 'updated' },
+    });
+    assert.equal(replay.status, 200);
+    const replayBody = (await replay.json()) as typeof firstBody;
+    assert.equal(replayBody.created, false);
+    assert.equal(replayBody.group_profile.id, firstBody.group_profile.id);
+    assert.equal(replayBody.group_profile.display_name, '研发群 updated');
+    assert.equal(replayBody.group_profile.group_type, 'team');
+    assert.equal(replayBody.group_profile.default_reply_mode, 'dialog');
+    assert.equal(replayBody.group_profile.context_scope, 'group.ops');
+    assert.deepEqual(replayBody.group_profile.metadata, { source: 'updated' });
+  });
+});
+
+test('HTTP group profile get, resolve, defaults patch, and validation behavior', async () => {
+  await withServer(async (baseUrl) => {
+    const created = await postJson(baseUrl, '/api/v1/group-profiles', {
+      platform: 'telegram',
+      external_group_id: 'Group-1',
+    });
+    assert.equal(created.status, 201);
+    const body = (await created.json()) as { group_profile: { id: string } };
+
+    const got = await fetch(`${baseUrl}/api/v1/group-profiles/${body.group_profile.id}`);
+    assert.equal(got.status, 200);
+    assert.equal(((await got.json()) as { group_profile: { id: string } }).group_profile.id, body.group_profile.id);
+
+    const resolved = await fetch(`${baseUrl}/api/v1/group-profiles/resolve?platform=Telegram&external_group_id=Group-1`);
+    assert.equal(resolved.status, 200);
+    const resolvedBody = (await resolved.json()) as { group_profile: { id: string; platform: string } };
+    assert.equal(resolvedBody.group_profile.id, body.group_profile.id);
+    assert.equal(resolvedBody.group_profile.platform, 'telegram');
+
+    const patched = await patchJson(baseUrl, `/api/v1/group-profiles/${body.group_profile.id}/defaults`, {
+      default_reply_mode: 'dialog',
+      context_scope: 'group.support',
+      memory_scope: 'group.support',
+      tone: 'friendly',
+    });
+    assert.equal(patched.status, 200);
+    const patchedBody = (await patched.json()) as { group_profile: { default_reply_mode: string; context_scope: string; memory_scope: string; tone: string } };
+    assert.equal(patchedBody.group_profile.default_reply_mode, 'dialog');
+    assert.equal(patchedBody.group_profile.context_scope, 'group.support');
+    assert.equal(patchedBody.group_profile.memory_scope, 'group.support');
+    assert.equal(patchedBody.group_profile.tone, 'friendly');
+
+    const invalidPatch = await patchJson(baseUrl, `/api/v1/group-profiles/${body.group_profile.id}/defaults`, { default_reply_mode: 'stream' });
+    assert.equal(invalidPatch.status, 400);
+    assert.equal(((await invalidPatch.json()) as { error: { code: string } }).error.code, 'AL_BAD_REQUEST');
+
+    const missingPatch = await patchJson(baseUrl, '/api/v1/group-profiles/missing/defaults', { default_reply_mode: 'thread' });
+    assert.equal(missingPatch.status, 404);
+    assert.equal(((await missingPatch.json()) as { error: { code: string } }).error.code, 'AL_GROUP_PROFILE_NOT_FOUND');
+
+    const missingGet = await fetch(`${baseUrl}/api/v1/group-profiles/missing`);
+    assert.equal(missingGet.status, 404);
+    assert.equal(((await missingGet.json()) as { error: { code: string } }).error.code, 'AL_GROUP_PROFILE_NOT_FOUND');
+
+    const notFoundResolve = await fetch(`${baseUrl}/api/v1/group-profiles/resolve?platform=telegram&external_group_id=missing`);
+    assert.equal(notFoundResolve.status, 404);
+    assert.equal(((await notFoundResolve.json()) as { error: { code: string } }).error.code, 'AL_GROUP_PROFILE_NOT_FOUND');
+
+    const badQuery = await fetch(`${baseUrl}/api/v1/group-profiles/resolve?platform=telegram`);
+    assert.equal(badQuery.status, 400);
+    assert.equal(((await badQuery.json()) as { error: { code: string } }).error.code, 'AL_BAD_REQUEST');
+  });
+});
+
+test('HTTP group profile upsert does not merge different platform or external_group_id', async () => {
+  await withServer(async (baseUrl) => {
+    const a = await postJson(baseUrl, '/api/v1/group-profiles', { platform: 'feishu', external_group_id: 'same' });
+    const b = await postJson(baseUrl, '/api/v1/group-profiles', { platform: 'telegram', external_group_id: 'same' });
+    const c = await postJson(baseUrl, '/api/v1/group-profiles', { platform: 'feishu', external_group_id: 'Same' });
+    const ab = (await a.json()) as { group_profile: { id: string } };
+    const bb = (await b.json()) as { group_profile: { id: string } };
+    const cb = (await c.json()) as { group_profile: { id: string } };
+    assert.notEqual(bb.group_profile.id, ab.group_profile.id);
+    assert.notEqual(cb.group_profile.id, ab.group_profile.id);
+
+    const invalid = await postJson(baseUrl, '/api/v1/group-profiles', { platform: 'feishu', external_group_id: '', default_reply_mode: 'thread' });
+    assert.equal(invalid.status, 400);
+    assert.equal(((await invalid.json()) as { error: { code: string } }).error.code, 'AL_BAD_REQUEST');
+  });
+});

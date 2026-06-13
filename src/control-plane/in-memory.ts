@@ -5,6 +5,7 @@ import type {
   ControlActionRecord,
   DeviceRecord,
   Domain,
+  GroupProfileRecord,
   JsonRecord,
   LeaseRecord,
   MainUserRecord,
@@ -25,10 +26,23 @@ import {
   normalizePlatform,
   normalizeUserCategory,
 } from '../domain/channel-user.js';
+import {
+  DEFAULT_CONTEXT_SCOPE,
+  DEFAULT_GROUP_TONE,
+  DEFAULT_GROUP_TYPE,
+  DEFAULT_MEMORY_SCOPE,
+  DEFAULT_REPLY_MODE,
+  normalizeExternalGroupId,
+  normalizeGroupPlatform,
+  normalizeGroupScope,
+  normalizeGroupToken,
+  normalizeReplyMode,
+} from '../domain/group-profile.js';
 import { evaluateDispatchPolicy } from '../domain/policy.js';
 import {
   CHANNEL_USER_RETENTION_DEFAULTS,
   EVENT_RETENTION_DEFAULTS,
+  GROUP_PROFILE_RETENTION_DEFAULTS,
   MAIN_USER_RETENTION_DEFAULTS,
   PLATFORM_IDENTITY_RETENTION_DEFAULTS,
   TASK_RETENTION_DEFAULTS,
@@ -131,6 +145,8 @@ export class InMemoryControlPlane {
   private readonly channelUsers = new Map<string, ChannelUserRecord>();
   private readonly platformIdentities = new Map<string, PlatformIdentityRecord>();
   private readonly platformIdentityUnique = new Map<string, string>();
+  private readonly groupProfiles = new Map<string, GroupProfileRecord>();
+  private readonly groupProfileUnique = new Map<string, string>();
 
   constructor(options: ControlPlaneOptions = {}) {
     this.now = options.now ?? (() => new Date());
@@ -533,6 +549,107 @@ export class InMemoryControlPlane {
     const platformIdentity = this.mustGetPlatformIdentity(identityId);
     const channelUser = this.mustGetChannelUser(platformIdentity.channelUserId);
     return { channelUser, platformIdentity };
+  }
+
+  upsertGroupProfile(input: {
+    platform: string;
+    externalGroupId: string;
+    displayName?: string;
+    groupType?: string;
+    tone?: string;
+    defaultReplyMode?: string;
+    contextScope?: string;
+    memoryScope?: string;
+    metadata?: JsonRecord;
+    retention?: RetentionMetadataInput;
+  }): { groupProfile: GroupProfileRecord; created: boolean } {
+    const platform = normalizeGroupPlatform(input.platform);
+    const externalGroupId = normalizeExternalGroupId(input.externalGroupId);
+    const uniqueKey = groupProfileKey(platform, externalGroupId);
+    const displayName = normalizeOptionalDisplayName(input.displayName);
+    const existingId = this.groupProfileUnique.get(uniqueKey);
+    const now = this.timestamp();
+    if (existingId) {
+      const existing = this.mustGetGroupProfile(existingId);
+      const retention = input.retention
+        ? normalizeRetentionMetadata(input.retention, GROUP_PROFILE_RETENTION_DEFAULTS)
+        : recordRetention(existing);
+      const updated: GroupProfileRecord = {
+        ...existing,
+        externalGroupId,
+        normalizedExternalGroupId: externalGroupId,
+        ...(displayName ? { displayName } : {}),
+        ...(input.groupType !== undefined ? { groupType: normalizeGroupToken(input.groupType, 'group_type') } : {}),
+        ...(input.tone !== undefined ? { tone: normalizeGroupToken(input.tone, 'tone') } : {}),
+        ...(input.defaultReplyMode !== undefined ? { defaultReplyMode: normalizeReplyMode(input.defaultReplyMode) } : {}),
+        ...(input.contextScope !== undefined ? { contextScope: normalizeGroupScope(input.contextScope, 'context_scope') } : {}),
+        ...(input.memoryScope !== undefined ? { memoryScope: normalizeGroupScope(input.memoryScope, 'memory_scope') } : {}),
+        ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+        retentionClass: retention.retentionClass,
+        memorySpace: retention.memorySpace,
+        sourceSystem: retention.sourceSystem,
+        sensitivity: retention.sensitivity,
+        updatedAt: now,
+      };
+      this.groupProfiles.set(updated.id, updated);
+      return { groupProfile: updated, created: false };
+    }
+
+    const retention = normalizeRetentionMetadata(input.retention, GROUP_PROFILE_RETENTION_DEFAULTS);
+    const groupProfile: GroupProfileRecord = {
+      id: randomUUID(),
+      platform,
+      externalGroupId,
+      normalizedExternalGroupId: externalGroupId,
+      displayName: displayName ?? 'Group',
+      groupType: input.groupType !== undefined ? normalizeGroupToken(input.groupType, 'group_type') : DEFAULT_GROUP_TYPE,
+      tone: input.tone !== undefined ? normalizeGroupToken(input.tone, 'tone') : DEFAULT_GROUP_TONE,
+      defaultReplyMode: input.defaultReplyMode !== undefined ? normalizeReplyMode(input.defaultReplyMode) : DEFAULT_REPLY_MODE,
+      contextScope: input.contextScope !== undefined ? normalizeGroupScope(input.contextScope, 'context_scope') : DEFAULT_CONTEXT_SCOPE,
+      memoryScope: input.memoryScope !== undefined ? normalizeGroupScope(input.memoryScope, 'memory_scope') : DEFAULT_MEMORY_SCOPE,
+      metadata: input.metadata ?? {},
+      retentionClass: retention.retentionClass,
+      memorySpace: retention.memorySpace,
+      sourceSystem: retention.sourceSystem,
+      sensitivity: retention.sensitivity,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.groupProfiles.set(groupProfile.id, groupProfile);
+    this.groupProfileUnique.set(uniqueKey, groupProfile.id);
+    return { groupProfile, created: true };
+  }
+
+  getGroupProfile(id: string): GroupProfileRecord | undefined {
+    return this.groupProfiles.get(id);
+  }
+
+  resolveGroupProfile(input: { platform: string; externalGroupId: string }): GroupProfileRecord | undefined {
+    const platform = normalizeGroupPlatform(input.platform);
+    const externalGroupId = normalizeExternalGroupId(input.externalGroupId);
+    const id = this.groupProfileUnique.get(groupProfileKey(platform, externalGroupId));
+    return id ? this.groupProfiles.get(id) : undefined;
+  }
+
+  setGroupProfileDefaults(input: {
+    groupProfileId: string;
+    defaultReplyMode?: string;
+    contextScope?: string;
+    memoryScope?: string;
+    tone?: string;
+  }): { groupProfile: GroupProfileRecord } {
+    const existing = this.groupProfiles.get(input.groupProfileId);
+    if (!existing) throw new AgentlinkError(404, 'AL_GROUP_PROFILE_NOT_FOUND', 'Group profile not found');
+    const updated: GroupProfileRecord = {
+      ...existing,
+      ...(input.defaultReplyMode !== undefined ? { defaultReplyMode: normalizeReplyMode(input.defaultReplyMode) } : {}),
+      ...(input.contextScope !== undefined ? { contextScope: normalizeGroupScope(input.contextScope, 'context_scope') } : {}),
+      ...(input.memoryScope !== undefined ? { memoryScope: normalizeGroupScope(input.memoryScope, 'memory_scope') } : {}),
+      ...(input.tone !== undefined ? { tone: normalizeGroupToken(input.tone, 'tone') } : {}),
+      updatedAt: this.timestamp(),
+    };
+    this.groupProfiles.set(updated.id, updated);
+    return { groupProfile: updated };
   }
 
   revokeDevice(deviceId: string, reason = 'device_revoked'): { device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] } {
@@ -942,6 +1059,12 @@ export class InMemoryControlPlane {
     return platformIdentity;
   }
 
+  private mustGetGroupProfile(groupProfileId: string): GroupProfileRecord {
+    const groupProfile = this.groupProfiles.get(groupProfileId);
+    if (!groupProfile) throw new AgentlinkError(404, 'AL_GROUP_PROFILE_NOT_FOUND', 'Group profile not found');
+    return groupProfile;
+  }
+
   private findActiveLease(runId: string): LeaseRecord | undefined {
     return [...this.leases.values()].find((lease) => lease.runId === runId && isActiveLeaseStatus(lease.status));
   }
@@ -1171,6 +1294,10 @@ function toExternalPolicyErrorCode(code: string | undefined): 'AL_POLICY_DENIED'
 
 function platformIdentityKey(platform: string, normalizedExternalId: string): string {
   return `${platform}:${normalizedExternalId}`;
+}
+
+function groupProfileKey(platform: string, normalizedExternalGroupId: string): string {
+  return `${platform}:${normalizedExternalGroupId}`;
 }
 
 function normalizeOptionalDisplayName(displayName: string | undefined): string | undefined {

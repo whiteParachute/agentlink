@@ -1158,6 +1158,103 @@ WITH updated AS (
 SELECT row_to_json(cu) AS channel_user
 FROM updated cu;
 `,
+
+  findGroupProfileById: `
+SELECT row_to_json(gp) AS group_profile
+FROM al_group_profile gp
+WHERE gp.id = $1;
+`,
+
+  findGroupProfileByNaturalKey: `
+SELECT row_to_json(gp) AS group_profile
+FROM al_group_profile gp
+WHERE gp.platform = $1
+  AND gp.normalized_external_group_id = $2;
+`,
+
+  insertGroupProfile: `
+WITH inserted AS (
+  INSERT INTO al_group_profile (
+    id,
+    platform,
+    external_group_id,
+    normalized_external_group_id,
+    display_name,
+    group_type,
+    tone,
+    default_reply_mode,
+    context_scope,
+    memory_scope,
+    metadata,
+    retention_class,
+    memory_space,
+    source_system,
+    sensitivity,
+    created_at,
+    updated_at
+  ) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $9,
+    $10,
+    $11::jsonb,
+    $12::al_retention_class,
+    $13,
+    $14,
+    $15::al_sensitivity,
+    $16,
+    $16
+  )
+  RETURNING *
+)
+SELECT row_to_json(gp) AS group_profile
+FROM inserted gp;
+`,
+
+  updateGroupProfile: `
+WITH updated AS (
+  UPDATE al_group_profile
+  SET external_group_id = $2,
+      normalized_external_group_id = $3,
+      display_name = COALESCE($4, display_name),
+      group_type = COALESCE($5, group_type),
+      tone = COALESCE($6, tone),
+      default_reply_mode = COALESCE($7, default_reply_mode),
+      context_scope = COALESCE($8, context_scope),
+      memory_scope = COALESCE($9, memory_scope),
+      metadata = COALESCE($10::jsonb, metadata),
+      retention_class = $11::al_retention_class,
+      memory_space = $12,
+      source_system = $13,
+      sensitivity = $14::al_sensitivity,
+      updated_at = $15
+  WHERE id = $1
+  RETURNING *
+)
+SELECT row_to_json(gp) AS group_profile
+FROM updated gp;
+`,
+
+  updateGroupProfileDefaults: `
+WITH updated AS (
+  UPDATE al_group_profile
+  SET default_reply_mode = COALESCE($2, default_reply_mode),
+      context_scope = COALESCE($3, context_scope),
+      memory_scope = COALESCE($4, memory_scope),
+      tone = COALESCE($5, tone),
+      updated_at = $6
+  WHERE id = $1
+  RETURNING *
+)
+SELECT row_to_json(gp) AS group_profile
+FROM updated gp;
+`,
 } as const;
 
 export type PostgreSqlStatementName = keyof typeof PostgreSqlStatements;

@@ -89,6 +89,39 @@ export class PostgresControlPlane implements AgentlinkControlPlanePort {
     return await this.withRepository((repository) => repository.resolvePlatformIdentity(input));
   }
 
+  async upsertGroupProfile(input: {
+    platform: string;
+    externalGroupId: string;
+    displayName?: string;
+    groupType?: string;
+    tone?: string;
+    defaultReplyMode?: string;
+    contextScope?: string;
+    memoryScope?: string;
+    metadata?: JsonRecord;
+    retention?: RetentionMetadataInput;
+  }) {
+    return await this.withRepository((repository) => repository.upsertGroupProfile(input));
+  }
+
+  async getGroupProfile(id: string) {
+    return await this.withRepository((repository) => repository.getGroupProfile(id));
+  }
+
+  async resolveGroupProfile(input: { platform: string; externalGroupId: string }) {
+    return await this.withRepository((repository) => repository.resolveGroupProfile(input));
+  }
+
+  async setGroupProfileDefaults(input: {
+    groupProfileId: string;
+    defaultReplyMode?: string;
+    contextScope?: string;
+    memoryScope?: string;
+    tone?: string;
+  }) {
+    return await this.withRepository((repository) => repository.setGroupProfileDefaults(input));
+  }
+
   async revokeDevice(deviceId: string, reason?: string) {
     return await this.withRepository((repository) => repository.revokeDevice(deviceId, reason));
   }

@@ -203,3 +203,25 @@ See `docs/m1-control-plane-reuse-boundary.md` for the per-object classification,
 - PostgreSQL upsert is transaction-based. It first looks up the unique identity, inserts ChannelUser then PlatformIdentity on first create, and recovers unique-race insert failures by rolling back and re-reading/updating the existing identity to avoid orphan channel users.
 - Test count: 206. Tests cover normalization, retention defaults, in-memory upsert/replay/no-merge/category/resolve behavior, migration unique/FK/CHECK/retention/out-of-scope invariants, PostgreSQL statement envelopes, repository create/update/unique-race/category/resolve behavior, and HTTP 201/200/400/404 snake_case flows.
 - Remaining risks: no live PostgreSQL DSN smoke was run in this environment; real concurrent unique-race behavior is covered only by repository-scripted tests, not by a live database. GroupProfile, Entry/SourceEvent, Session, Memory, MemoryBridge, work/personal interop, historical import, complex permissions, multiple MainUsers, tenants, real platform adapters, and cross-platform identity merge remain intentionally out of scope.
+
+## 2026-06-13 AL-M1-005 GroupProfile / GroupContext preparation update
+
+- Added the AL-M1-005 group profile minimum model as a single persisted `GroupProfileRecord` plus a derived/read-only `GroupContextProjection` type. `GroupProfileRecord` carries platform natural key, display name, group type, tone, default reply mode, context scope, memory scope, metadata, AL-M1-002 retention metadata, and timestamps.
+- The new record intentionally has no `domain`, no `main_user_id`, no tenant field, and no membership relation. It is not linked to `al_platform_identity`; ChannelUser and MainUser behavior from AL-M1-003/004 remains unchanged.
+- Added `src/domain/group-profile.ts` normalization helpers:
+  - platform: trim + lowercase + `^[a-z][a-z0-9._:-]{0,63}$`
+  - external group id: trim only, non-empty, max 512 characters
+  - reply mode: `thread | dialog`, default `thread`
+  - group type / tone: `^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`, defaults `general` / `neutral`
+  - context scope / memory scope: `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`, defaults `group` / `group`.
+- Added `GROUP_PROFILE_RETENTION_DEFAULTS` (`operational` / `default` / `agentlink` / `internal`).
+- Updated `migrations/0001_initial.sql` with `al_group_profile`, including `UNIQUE(platform, normalized_external_group_id)`, default reply/context/memory values, metadata object CHECK, retention boundary columns, and group type / retention indexes.
+- Wired the model through the control-plane port, in-memory implementation, PostgreSQL statements/repository, PostgreSQL adapter, and HTTP API:
+  - `POST /api/v1/group-profiles`
+  - `GET /api/v1/group-profiles/{id}`
+  - `GET /api/v1/group-profiles/resolve?platform=...&external_group_id=...`
+  - `PATCH /api/v1/group-profiles/{id}/defaults`
+- Upsert semantics are intentionally minimal: same `(platform, normalized_external_group_id)` returns the same GroupProfile with `created=false`; different platform or different external group id creates a separate GroupProfile. No cross-platform merge, membership, raw message persistence, context package builder, memory query/write, or real platform adapter is included in this slice.
+- PostgreSQL upsert is transaction-based and uses explicit `row_to_json(gp) AS group_profile` envelopes. Unique-race insert failures are recovered by rolling back, re-reading the existing group profile, and applying the same update path.
+- Test count: 223. Tests cover domain normalization, retention defaults, migration invariant / boundary checks, in-memory upsert/replay/no-merge/get/resolve/defaults behavior, PostgreSQL statement envelopes, repository create/update/unique-race/get/resolve/defaults behavior, and HTTP 201/200/400/404 snake_case flows.
+- Remaining risks: no live PostgreSQL DSN smoke was run in this environment; real concurrent unique-race behavior is covered by repository-scripted tests only. Entry, SourceEvent, Session, Memory, MemoryBridge, work/personal interop, historical import, complex permissions, multiple MainUsers, tenants, real platform adapters, frontend UI, group membership, raw message saving, recent summary, context package builder, and memory query/write remain intentionally out of scope.

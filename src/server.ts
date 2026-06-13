@@ -5,7 +5,7 @@ import { InMemoryControlPlane, type CreateTaskInput, type RegisterDeviceInput } 
 import { PostgresControlPlane } from './control-plane/postgres.js';
 import type { AgentlinkControlPlanePort } from './control-plane/port.js';
 import { PgRuntime } from './db/pg-client.js';
-import type { CapabilityGrantRecord, ChannelUserRecord, DeviceRecord, JsonRecord, MainUserRecord, PlatformIdentityRecord, RunRecord, RunnerRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
+import type { CapabilityGrantRecord, ChannelUserRecord, DeviceRecord, GroupProfileRecord, JsonRecord, MainUserRecord, PlatformIdentityRecord, RunRecord, RunnerRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
 import { RetentionMetadataError, type RetentionMetadataInput } from './domain/retention.js';
 import type { RunStatus } from './domain/status.js';
 import { sendJson } from './http/json.js';
@@ -94,6 +94,7 @@ async function handleRequest(
         'agentlet-progress',
         'agentlet-complete',
         'channel-user-api',
+        'group-profile-api',
       ],
     });
     return;
@@ -166,6 +167,67 @@ async function handleRequest(
       channel_user: toChannelUserDto(result.channelUser),
       platform_identity: toPlatformIdentityDto(result.platformIdentity),
     });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v1/group-profiles') {
+    const body = await readJsonRecord(req);
+    const displayName = optionalNonEmptyString(body, 'display_name');
+    const groupType = optionalString(body, 'group_type');
+    const tone = optionalString(body, 'tone');
+    const defaultReplyMode = optionalString(body, 'default_reply_mode');
+    const contextScope = optionalString(body, 'context_scope');
+    const memoryScope = optionalString(body, 'memory_scope');
+    const metadata = optionalRecord(body, 'metadata');
+    const retention = optionalRetention(body, 'retention');
+    const result = await controlPlane.upsertGroupProfile({
+      platform: requireString(body, 'platform'),
+      externalGroupId: requireString(body, 'external_group_id'),
+      ...(displayName ? { displayName } : {}),
+      ...(groupType !== undefined ? { groupType } : {}),
+      ...(tone !== undefined ? { tone } : {}),
+      ...(defaultReplyMode !== undefined ? { defaultReplyMode } : {}),
+      ...(contextScope !== undefined ? { contextScope } : {}),
+      ...(memoryScope !== undefined ? { memoryScope } : {}),
+      ...(metadata !== undefined ? { metadata } : {}),
+      ...(retention ? { retention } : {}),
+    });
+    sendJson(res, result.created ? 201 : 200, { group_profile: toGroupProfileDto(result.groupProfile), created: result.created });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/v1/group-profiles/resolve') {
+    const platform = requireQueryString(url, 'platform');
+    const externalGroupId = requireQueryString(url, 'external_group_id');
+    const groupProfile = await controlPlane.resolveGroupProfile({ platform, externalGroupId });
+    if (!groupProfile) throw new AgentlinkError(404, 'AL_GROUP_PROFILE_NOT_FOUND', 'Group profile not found');
+    sendJson(res, 200, { group_profile: toGroupProfileDto(groupProfile) });
+    return;
+  }
+
+  const groupProfileDefaultsMatch = /^\/api\/v1\/group-profiles\/([^/]+)\/defaults$/.exec(url.pathname);
+  if (req.method === 'PATCH' && groupProfileDefaultsMatch) {
+    const body = await readJsonRecord(req);
+    const defaultReplyMode = optionalString(body, 'default_reply_mode');
+    const contextScope = optionalString(body, 'context_scope');
+    const memoryScope = optionalString(body, 'memory_scope');
+    const tone = optionalString(body, 'tone');
+    const result = await controlPlane.setGroupProfileDefaults({
+      groupProfileId: groupProfileDefaultsMatch[1] ?? '',
+      ...(defaultReplyMode !== undefined ? { defaultReplyMode } : {}),
+      ...(contextScope !== undefined ? { contextScope } : {}),
+      ...(memoryScope !== undefined ? { memoryScope } : {}),
+      ...(tone !== undefined ? { tone } : {}),
+    });
+    sendJson(res, 200, { group_profile: toGroupProfileDto(result.groupProfile) });
+    return;
+  }
+
+  const groupProfileGetMatch = /^\/api\/v1\/group-profiles\/([^/]+)$/.exec(url.pathname);
+  if (req.method === 'GET' && groupProfileGetMatch) {
+    const groupProfile = await controlPlane.getGroupProfile(groupProfileGetMatch[1] ?? '');
+    if (!groupProfile) throw new AgentlinkError(404, 'AL_GROUP_PROFILE_NOT_FOUND', 'Group profile not found');
+    sendJson(res, 200, { group_profile: toGroupProfileDto(groupProfile) });
     return;
   }
 
@@ -706,6 +768,30 @@ function toPlatformIdentityDto(platformIdentity: PlatformIdentityRecord) {
     },
     created_at: platformIdentity.createdAt,
     updated_at: platformIdentity.updatedAt,
+  };
+}
+
+function toGroupProfileDto(groupProfile: GroupProfileRecord) {
+  return {
+    id: groupProfile.id,
+    platform: groupProfile.platform,
+    external_group_id: groupProfile.externalGroupId,
+    normalized_external_group_id: groupProfile.normalizedExternalGroupId,
+    display_name: groupProfile.displayName,
+    group_type: groupProfile.groupType,
+    tone: groupProfile.tone,
+    default_reply_mode: groupProfile.defaultReplyMode,
+    context_scope: groupProfile.contextScope,
+    memory_scope: groupProfile.memoryScope,
+    metadata: groupProfile.metadata,
+    retention: {
+      retention_class: groupProfile.retentionClass,
+      memory_space: groupProfile.memorySpace,
+      source_system: groupProfile.sourceSystem,
+      sensitivity: groupProfile.sensitivity,
+    },
+    created_at: groupProfile.createdAt,
+    updated_at: groupProfile.updatedAt,
   };
 }
 

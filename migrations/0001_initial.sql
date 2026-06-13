@@ -285,6 +285,29 @@ CREATE TABLE al_platform_identity (
   UNIQUE (platform, normalized_external_id)
 );
 
+-- AL-M1-005 minimal group profile. Group context is a read projection derived
+-- from this single table; no membership/source/session/memory tables are added.
+CREATE TABLE al_group_profile (
+  id uuid PRIMARY KEY,
+  platform text NOT NULL CHECK (platform ~ '^[a-z][a-z0-9._:-]{0,63}$'),
+  external_group_id text NOT NULL CHECK (length(btrim(external_group_id)) BETWEEN 1 AND 512),
+  normalized_external_group_id text NOT NULL CHECK (length(btrim(normalized_external_group_id)) BETWEEN 1 AND 512),
+  display_name text NOT NULL DEFAULT 'Group',
+  group_type text NOT NULL DEFAULT 'general' CHECK (group_type ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'),
+  tone text NOT NULL DEFAULT 'neutral' CHECK (tone ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$'),
+  default_reply_mode text NOT NULL DEFAULT 'thread' CHECK (default_reply_mode IN ('thread', 'dialog')),
+  context_scope text NOT NULL DEFAULT 'group' CHECK (context_scope ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  memory_scope text NOT NULL DEFAULT 'group' CHECK (memory_scope ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
+  retention_class al_retention_class NOT NULL DEFAULT 'operational',
+  memory_space text NOT NULL DEFAULT 'default' CHECK (memory_space ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  source_system text NOT NULL DEFAULT 'agentlink' CHECK (source_system ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  sensitivity al_sensitivity NOT NULL DEFAULT 'internal',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (platform, normalized_external_group_id)
+);
+
 
 CREATE INDEX idx_al_task_domain_status_created ON al_task(domain, status, created_at DESC);
 CREATE UNIQUE INDEX uq_al_run_task_attempt ON al_run(task_id, attempt_no);
@@ -306,6 +329,8 @@ CREATE INDEX idx_al_control_action_device_status_created ON al_control_action(de
 CREATE INDEX idx_al_audit_log_domain_created ON al_audit_log(domain, created_at DESC);
 CREATE INDEX idx_al_channel_user_category ON al_channel_user(category);
 CREATE INDEX idx_al_platform_identity_channel_user ON al_platform_identity(channel_user_id);
+CREATE INDEX idx_al_group_profile_group_type ON al_group_profile(group_type);
+CREATE INDEX idx_al_group_profile_retention ON al_group_profile(memory_space, retention_class);
 
 -- AL-M1-002 retention lookup indexes: support querying long-lived objects by
 -- their retention boundary (memory_space + retention_class) per domain.

@@ -3,6 +3,7 @@ import type {
   ChannelUserRecord,
   ControlActionRecord,
   DeviceRecord,
+  GroupProfileRecord,
   LeaseRecord,
   MainUserRecord,
   PlatformIdentityRecord,
@@ -77,4 +78,25 @@ export interface AgentlinkControlPlanePort {
   }): MaybePromise<{ channelUser: ChannelUserRecord; platformIdentity: PlatformIdentityRecord; created: boolean }>;
   setChannelUserCategory(input: { channelUserId: string; category: string }): MaybePromise<{ channelUser: ChannelUserRecord }>;
   resolvePlatformIdentity(input: { platform: string; externalId: string }): MaybePromise<{ channelUser: ChannelUserRecord; platformIdentity: PlatformIdentityRecord } | undefined>;
+  upsertGroupProfile(input: {
+    platform: string;
+    externalGroupId: string;
+    displayName?: string;
+    groupType?: string;
+    tone?: string;
+    defaultReplyMode?: string;
+    contextScope?: string;
+    memoryScope?: string;
+    metadata?: Record<string, unknown>;
+    retention?: RetentionMetadataInput;
+  }): MaybePromise<{ groupProfile: GroupProfileRecord; created: boolean }>;
+  getGroupProfile(id: string): MaybePromise<GroupProfileRecord | undefined>;
+  resolveGroupProfile(input: { platform: string; externalGroupId: string }): MaybePromise<GroupProfileRecord | undefined>;
+  setGroupProfileDefaults(input: {
+    groupProfileId: string;
+    defaultReplyMode?: string;
+    contextScope?: string;
+    memoryScope?: string;
+    tone?: string;
+  }): MaybePromise<{ groupProfile: GroupProfileRecord }>;
 }

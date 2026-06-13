@@ -7,6 +7,7 @@ import type {
   ControlActionRecord,
   DeviceRecord,
   Domain,
+  GroupProfileRecord,
   JsonRecord,
   LeaseRecord,
   MainUserRecord,
@@ -21,10 +22,23 @@ import type {
   WorkdirGrantRecord,
 } from '../domain/entities.js';
 import { DEFAULT_USER_CATEGORY, normalizeExternalId, normalizePlatform, normalizeUserCategory } from '../domain/channel-user.js';
+import {
+  DEFAULT_CONTEXT_SCOPE,
+  DEFAULT_GROUP_TONE,
+  DEFAULT_GROUP_TYPE,
+  DEFAULT_MEMORY_SCOPE,
+  DEFAULT_REPLY_MODE,
+  normalizeExternalGroupId,
+  normalizeGroupPlatform,
+  normalizeGroupScope,
+  normalizeGroupToken,
+  normalizeReplyMode,
+} from '../domain/group-profile.js';
 import { evaluateDispatchPolicy } from '../domain/policy.js';
 import {
   CHANNEL_USER_RETENTION_DEFAULTS,
   EVENT_RETENTION_DEFAULTS,
+  GROUP_PROFILE_RETENTION_DEFAULTS,
   MAIN_USER_RETENTION_DEFAULTS,
   PLATFORM_IDENTITY_RETENTION_DEFAULTS,
   TASK_RETENTION_DEFAULTS,
@@ -757,6 +771,116 @@ export class PostgreSqlRepository {
     return await this.findPlatformIdentityByNormalized(this.client, normalizePlatform(input.platform), normalizeExternalId(input.externalId));
   }
 
+  async upsertGroupProfile(input: {
+    platform: string;
+    externalGroupId: string;
+    displayName?: string;
+    groupType?: string;
+    tone?: string;
+    defaultReplyMode?: string;
+    contextScope?: string;
+    memoryScope?: string;
+    metadata?: JsonRecord;
+    retention?: RetentionMetadataInput;
+  }): Promise<{ groupProfile: GroupProfileRecord; created: boolean }> {
+    const platform = normalizeGroupPlatform(input.platform);
+    const externalGroupId = normalizeExternalGroupId(input.externalGroupId);
+    const displayName = normalizeOptionalDisplayName(input.displayName);
+
+    try {
+      return await withTransaction(this.client, async (tx) => {
+        const existing = await this.findGroupProfileByNaturalKey(tx, platform, externalGroupId);
+        if (existing) {
+          const groupProfile = await this.updateExistingGroupProfile(tx, existing, {
+            externalGroupId,
+            ...(displayName ? { displayName } : {}),
+            ...(input.groupType !== undefined ? { groupType: input.groupType } : {}),
+            ...(input.tone !== undefined ? { tone: input.tone } : {}),
+            ...(input.defaultReplyMode !== undefined ? { defaultReplyMode: input.defaultReplyMode } : {}),
+            ...(input.contextScope !== undefined ? { contextScope: input.contextScope } : {}),
+            ...(input.memoryScope !== undefined ? { memoryScope: input.memoryScope } : {}),
+            ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+            ...(input.retention ? { retention: input.retention } : {}),
+          });
+          return { groupProfile, created: false };
+        }
+
+        const now = this.timestamp();
+        const retention = normalizeRetentionMetadata(input.retention, GROUP_PROFILE_RETENTION_DEFAULTS);
+        const groupProfile = mapGroupProfile(requireSingleRow(
+          await tx.query<EnvelopeRow>(PostgreSqlStatements.insertGroupProfile, [
+            randomUUID(),
+            platform,
+            externalGroupId,
+            externalGroupId,
+            displayName ?? 'Group',
+            input.groupType !== undefined ? normalizeGroupToken(input.groupType, 'group_type') : DEFAULT_GROUP_TYPE,
+            input.tone !== undefined ? normalizeGroupToken(input.tone, 'tone') : DEFAULT_GROUP_TONE,
+            input.defaultReplyMode !== undefined ? normalizeReplyMode(input.defaultReplyMode) : DEFAULT_REPLY_MODE,
+            input.contextScope !== undefined ? normalizeGroupScope(input.contextScope, 'context_scope') : DEFAULT_CONTEXT_SCOPE,
+            input.memoryScope !== undefined ? normalizeGroupScope(input.memoryScope, 'memory_scope') : DEFAULT_MEMORY_SCOPE,
+            toJsonbParam(input.metadata ?? {}),
+            retention.retentionClass,
+            retention.memorySpace,
+            retention.sourceSystem,
+            retention.sensitivity,
+            now,
+          ]),
+          'AL_INTERNAL',
+          'GroupProfile insert returned no row',
+        ).group_profile);
+        return { groupProfile, created: true };
+      });
+    } catch (error: unknown) {
+      if (!isUniqueViolation(error)) throw error;
+      const groupProfile = await withTransaction(this.client, async (tx) => {
+        const existing = await this.findGroupProfileByNaturalKey(tx, platform, externalGroupId);
+        if (!existing) throw error;
+        return await this.updateExistingGroupProfile(tx, existing, {
+          externalGroupId,
+          ...(displayName ? { displayName } : {}),
+          ...(input.groupType !== undefined ? { groupType: input.groupType } : {}),
+          ...(input.tone !== undefined ? { tone: input.tone } : {}),
+          ...(input.defaultReplyMode !== undefined ? { defaultReplyMode: input.defaultReplyMode } : {}),
+          ...(input.contextScope !== undefined ? { contextScope: input.contextScope } : {}),
+          ...(input.memoryScope !== undefined ? { memoryScope: input.memoryScope } : {}),
+          ...(input.metadata !== undefined ? { metadata: input.metadata } : {}),
+          ...(input.retention ? { retention: input.retention } : {}),
+        });
+      });
+      return { groupProfile, created: false };
+    }
+  }
+
+  async getGroupProfile(id: string): Promise<GroupProfileRecord | undefined> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.findGroupProfileById, [id]);
+    if (result.rowCount === 0) return undefined;
+    return mapGroupProfile(requireSingleRow(result, 'AL_INTERNAL', 'GroupProfile lookup returned rowCount without a row').group_profile);
+  }
+
+  async resolveGroupProfile(input: { platform: string; externalGroupId: string }): Promise<GroupProfileRecord | undefined> {
+    return await this.findGroupProfileByNaturalKey(this.client, normalizeGroupPlatform(input.platform), normalizeExternalGroupId(input.externalGroupId));
+  }
+
+  async setGroupProfileDefaults(input: {
+    groupProfileId: string;
+    defaultReplyMode?: string;
+    contextScope?: string;
+    memoryScope?: string;
+    tone?: string;
+  }): Promise<{ groupProfile: GroupProfileRecord }> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.updateGroupProfileDefaults, [
+      input.groupProfileId,
+      input.defaultReplyMode !== undefined ? normalizeReplyMode(input.defaultReplyMode) : null,
+      input.contextScope !== undefined ? normalizeGroupScope(input.contextScope, 'context_scope') : null,
+      input.memoryScope !== undefined ? normalizeGroupScope(input.memoryScope, 'memory_scope') : null,
+      input.tone !== undefined ? normalizeGroupToken(input.tone, 'tone') : null,
+      this.timestamp(),
+    ]);
+    if (result.rowCount === 0) throw new AgentlinkError(404, 'AL_GROUP_PROFILE_NOT_FOUND', 'Group profile not found');
+    return { groupProfile: mapGroupProfile(requireSingleRow(result, 'AL_INTERNAL', 'GroupProfile defaults update returned no row').group_profile) };
+  }
+
   async revokeDevice(deviceId: string, reason = 'device_revoked'): Promise<{ device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] }> {
     return await withTransaction(this.client, async (tx) => {
       const now = this.timestamp();
@@ -923,6 +1047,54 @@ export class PostgreSqlRepository {
     return { channelUser, platformIdentity };
   }
 
+  private async findGroupProfileByNaturalKey(
+    client: SqlClient,
+    platform: string,
+    normalizedExternalGroupId: string,
+  ): Promise<GroupProfileRecord | undefined> {
+    const result = await client.query<EnvelopeRow>(PostgreSqlStatements.findGroupProfileByNaturalKey, [platform, normalizedExternalGroupId]);
+    if (result.rowCount === 0) return undefined;
+    return mapGroupProfile(requireSingleRow(result, 'AL_INTERNAL', 'GroupProfile lookup returned rowCount without a row').group_profile);
+  }
+
+  private async updateExistingGroupProfile(
+    client: SqlClient,
+    existing: GroupProfileRecord,
+    input: {
+      externalGroupId: string;
+      displayName?: string;
+      groupType?: string;
+      tone?: string;
+      defaultReplyMode?: string;
+      contextScope?: string;
+      memoryScope?: string;
+      metadata?: JsonRecord;
+      retention?: RetentionMetadataInput;
+    },
+  ): Promise<GroupProfileRecord> {
+    const retention = input.retention
+      ? normalizeRetentionMetadata(input.retention, GROUP_PROFILE_RETENTION_DEFAULTS)
+      : recordRetention(existing);
+    const result = await client.query<EnvelopeRow>(PostgreSqlStatements.updateGroupProfile, [
+      existing.id,
+      input.externalGroupId,
+      input.externalGroupId,
+      input.displayName ?? null,
+      input.groupType !== undefined ? normalizeGroupToken(input.groupType, 'group_type') : null,
+      input.tone !== undefined ? normalizeGroupToken(input.tone, 'tone') : null,
+      input.defaultReplyMode !== undefined ? normalizeReplyMode(input.defaultReplyMode) : null,
+      input.contextScope !== undefined ? normalizeGroupScope(input.contextScope, 'context_scope') : null,
+      input.memoryScope !== undefined ? normalizeGroupScope(input.memoryScope, 'memory_scope') : null,
+      toNullableJsonbParam(input.metadata),
+      retention.retentionClass,
+      retention.memorySpace,
+      retention.sourceSystem,
+      retention.sensitivity,
+      this.timestamp(),
+    ]);
+    return mapGroupProfile(requireSingleRow(result, 'AL_INTERNAL', 'GroupProfile update returned no row').group_profile);
+  }
+
   private timestamp(): string {
     return this.now().toISOString();
   }
@@ -948,6 +1120,7 @@ interface EnvelopeRow {
   main_user?: unknown;
   channel_user?: unknown;
   platform_identity?: unknown;
+  group_profile?: unknown;
 }
 
 type RunEventRow = Record<string, unknown>;
@@ -1236,6 +1409,29 @@ function mapPlatformIdentity(value: unknown): PlatformIdentityRecord {
     externalId: readString(row, 'external_id'),
     normalizedExternalId: readString(row, 'normalized_external_id'),
     displayName: readString(row, 'display_name'),
+    metadata: readJsonRecord(row, 'metadata'),
+    retentionClass: readRetentionClass(row, 'retention_class'),
+    memorySpace: readString(row, 'memory_space'),
+    sourceSystem: readString(row, 'source_system'),
+    sensitivity: readSensitivity(row, 'sensitivity'),
+    createdAt: readTimestamp(row, 'created_at'),
+    updatedAt: readTimestamp(row, 'updated_at'),
+  };
+}
+
+function mapGroupProfile(value: unknown): GroupProfileRecord {
+  const row = asRecord(value, 'group_profile');
+  return {
+    id: readString(row, 'id'),
+    platform: readString(row, 'platform'),
+    externalGroupId: readString(row, 'external_group_id'),
+    normalizedExternalGroupId: readString(row, 'normalized_external_group_id'),
+    displayName: readString(row, 'display_name'),
+    groupType: readString(row, 'group_type'),
+    tone: readString(row, 'tone'),
+    defaultReplyMode: readString(row, 'default_reply_mode') as GroupProfileRecord['defaultReplyMode'],
+    contextScope: readString(row, 'context_scope'),
+    memoryScope: readString(row, 'memory_scope'),
     metadata: readJsonRecord(row, 'metadata'),
     retentionClass: readRetentionClass(row, 'retention_class'),
     memorySpace: readString(row, 'memory_space'),
