@@ -884,3 +884,107 @@ test('HTTP progress API preserves raw payload alongside retention metadata', asy
     assert.equal(progBody.event.retention.source_system, 'agentlet');
   });
 });
+
+test('GET /api/v1/main-user/profile returns 404 before initialization', async () => {
+  await withServer(async (baseUrl) => {
+    const resp = await fetch(`${baseUrl}/api/v1/main-user/profile`);
+    assert.equal(resp.status, 404);
+    const body = (await resp.json()) as { error: { code: string } };
+    assert.equal(body.error.code, 'AL_MAIN_USER_NOT_FOUND');
+  });
+});
+
+test('POST /api/v1/main-user/profile creates profile and returns 201', async () => {
+  await withServer(async (baseUrl) => {
+    const resp = await postJson(baseUrl, '/api/v1/main-user/profile', {
+      display_name: 'Alice',
+      locale: 'zh-CN',
+      metadata: { theme: 'dark' },
+    });
+    assert.equal(resp.status, 201);
+    const body = (await resp.json()) as { main_user: Record<string, unknown>; created: boolean };
+    assert.equal(body.created, true);
+    assert.equal(body.main_user.id, 'main');
+    assert.equal(body.main_user.display_name, 'Alice');
+    assert.equal(body.main_user.locale, 'zh-CN');
+    assert.equal(body.main_user.timezone, 'Asia/Shanghai');
+    assert.deepEqual(body.main_user.metadata, { theme: 'dark' });
+    const retention = body.main_user.retention as Record<string, string>;
+    assert.equal(retention.retention_class, 'operational');
+    assert.equal(retention.memory_space, 'default');
+    assert.equal(retention.source_system, 'agentlink');
+    assert.equal(retention.sensitivity, 'internal');
+  });
+});
+
+test('GET /api/v1/main-user/profile returns 200 after initialization', async () => {
+  await withServer(async (baseUrl) => {
+    await postJson(baseUrl, '/api/v1/main-user/profile', { display_name: 'Bob' });
+    const resp = await fetch(`${baseUrl}/api/v1/main-user/profile`);
+    assert.equal(resp.status, 200);
+    const body = (await resp.json()) as { main_user: Record<string, unknown> };
+    assert.equal(body.main_user.display_name, 'Bob');
+    assert.ok(body.main_user.created_at);
+    assert.ok(body.main_user.updated_at);
+  });
+});
+
+test('second POST /api/v1/main-user/profile returns 200 and merges fields', async () => {
+  await withServer(async (baseUrl) => {
+    await postJson(baseUrl, '/api/v1/main-user/profile', { display_name: 'First', locale: 'en-US', metadata: { a: 1 } });
+    const resp = await postJson(baseUrl, '/api/v1/main-user/profile', { display_name: 'Second' });
+    assert.equal(resp.status, 200);
+    const body = (await resp.json()) as { main_user: Record<string, unknown>; created: boolean };
+    assert.equal(body.created, false);
+    assert.equal(body.main_user.display_name, 'Second');
+    assert.equal(body.main_user.locale, 'en-US');
+    assert.deepEqual(body.main_user.metadata, { a: 1 });
+  });
+});
+
+test('POST /api/v1/main-user/profile accepts snake_case retention', async () => {
+  await withServer(async (baseUrl) => {
+    const resp = await postJson(baseUrl, '/api/v1/main-user/profile', {
+      display_name: 'Alice',
+      retention: { memory_space: 'personal', sensitivity: 'confidential' },
+    });
+    assert.equal(resp.status, 201);
+    const body = (await resp.json()) as { main_user: { retention: Record<string, string> } };
+    assert.equal(body.main_user.retention.memory_space, 'personal');
+    assert.equal(body.main_user.retention.sensitivity, 'confidential');
+  });
+});
+
+test('POST /api/v1/main-user/profile rejects invalid retention with 400', async () => {
+  await withServer(async (baseUrl) => {
+    const resp = await postJson(baseUrl, '/api/v1/main-user/profile', {
+      display_name: 'Alice',
+      retention: { retention_class: 'invalid_class' },
+    });
+    assert.equal(resp.status, 400);
+    const body = (await resp.json()) as { error: { code: string; field: string } };
+    assert.equal(body.error.code, 'AL_BAD_REQUEST');
+    assert.equal(body.error.field, 'retention_class');
+  });
+});
+
+test('POST /api/v1/main-user/profile rejects empty display_name with 400', async () => {
+  await withServer(async (baseUrl) => {
+    const resp = await postJson(baseUrl, '/api/v1/main-user/profile', { display_name: '' });
+    assert.equal(resp.status, 400);
+    const body = (await resp.json()) as { error: { code: string } };
+    assert.equal(body.error.code, 'AL_BAD_REQUEST');
+  });
+});
+
+test('POST /api/v1/main-user/profile rejects non-object metadata with 400', async () => {
+  await withServer(async (baseUrl) => {
+    const resp = await postJson(baseUrl, '/api/v1/main-user/profile', {
+      display_name: 'Alice',
+      metadata: 'not-an-object',
+    });
+    assert.equal(resp.status, 400);
+    const body = (await resp.json()) as { error: { code: string } };
+    assert.equal(body.error.code, 'AL_BAD_REQUEST');
+  });
+});

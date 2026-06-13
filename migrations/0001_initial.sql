@@ -237,6 +237,23 @@ CREATE TABLE al_audit_log (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- AL-M1-003 singleton MainUser profile. There is exactly one main user per
+-- deployment; the singleton_key CHECK enforces that no second row can exist.
+CREATE TABLE al_main_user_profile (
+  singleton_key text PRIMARY KEY DEFAULT 'main' CHECK (singleton_key = 'main'),
+  display_name text NOT NULL DEFAULT 'Main User',
+  locale text NOT NULL DEFAULT 'zh-CN',
+  timezone text NOT NULL DEFAULT 'Asia/Shanghai',
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  retention_class al_retention_class NOT NULL DEFAULT 'operational',
+  memory_space text NOT NULL DEFAULT 'default' CHECK (memory_space ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  source_system text NOT NULL DEFAULT 'agentlink' CHECK (source_system ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  sensitivity al_sensitivity NOT NULL DEFAULT 'internal',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
+
 CREATE INDEX idx_al_task_domain_status_created ON al_task(domain, status, created_at DESC);
 CREATE UNIQUE INDEX uq_al_run_task_attempt ON al_run(task_id, attempt_no);
 CREATE INDEX idx_al_run_task ON al_run(task_id);

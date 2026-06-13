@@ -8,6 +8,7 @@ import type {
   Domain,
   JsonRecord,
   LeaseRecord,
+  MainUserRecord,
   PolicyDecisionRecord,
   RecoverableRunRecord,
   RunEventRecord,
@@ -20,6 +21,7 @@ import type {
 import { evaluateDispatchPolicy } from '../domain/policy.js';
 import {
   EVENT_RETENTION_DEFAULTS,
+  MAIN_USER_RETENTION_DEFAULTS,
   TASK_RETENTION_DEFAULTS,
   normalizeRetentionMetadata,
   type RetentionMetadataInput,
@@ -619,6 +621,40 @@ export class PostgreSqlRepository {
     return mapped;
   }
 
+  async getMainUserProfile(): Promise<MainUserRecord | undefined> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.findMainUserProfile);
+    if (result.rowCount === 0) return undefined;
+    return mapMainUser(requireSingleRow(result, 'AL_INTERNAL', 'MainUser lookup returned rowCount without a row').main_user);
+  }
+
+  async upsertMainUserProfile(input: {
+    displayName?: string;
+    locale?: string;
+    timezone?: string;
+    metadata?: JsonRecord;
+    retention?: RetentionMetadataInput;
+  }): Promise<{ mainUser: MainUserRecord; created: boolean }> {
+    const retention = normalizeRetentionMetadata(input.retention, MAIN_USER_RETENTION_DEFAULTS);
+    const existing = await this.getMainUserProfile();
+    const displayName = input.displayName ?? existing?.displayName ?? 'Main User';
+    const locale = input.locale ?? existing?.locale ?? 'zh-CN';
+    const timezone = input.timezone ?? existing?.timezone ?? 'Asia/Shanghai';
+    const metadata = input.metadata ?? existing?.metadata ?? {};
+
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.upsertMainUserProfile, [
+      displayName,
+      locale ?? null,
+      timezone ?? null,
+      toJsonbParam(metadata),
+      retention.retentionClass,
+      retention.memorySpace,
+      retention.sourceSystem,
+      retention.sensitivity,
+    ]);
+    const mainUser = mapMainUser(requireSingleRow(result, 'AL_INTERNAL', 'MainUser upsert returned no row').main_user);
+    return { mainUser, created: !existing };
+  }
+
   async revokeDevice(deviceId: string, reason = 'device_revoked'): Promise<{ device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] }> {
     return await withTransaction(this.client, async (tx) => {
       const now = this.timestamp();
@@ -744,6 +780,7 @@ interface EnvelopeRow {
   control_action?: unknown;
   device?: unknown;
   runner?: unknown;
+  main_user?: unknown;
 }
 
 type RunEventRow = Record<string, unknown>;
@@ -968,6 +1005,24 @@ function mapPolicyDecision(value: unknown): PolicyDecisionRecord {
   setOptionalString(record, 'reason', row.reason);
   return record;
 }
+
+function mapMainUser(value: unknown): MainUserRecord {
+  const row = asRecord(value, 'main_user');
+  return {
+    id: 'main',
+    displayName: readString(row, 'display_name'),
+    locale: readString(row, 'locale'),
+    timezone: readString(row, 'timezone'),
+    metadata: readJsonRecord(row, 'metadata'),
+    retentionClass: readRetentionClass(row, 'retention_class'),
+    memorySpace: readString(row, 'memory_space'),
+    sourceSystem: readString(row, 'source_system'),
+    sensitivity: readSensitivity(row, 'sensitivity'),
+    createdAt: readTimestamp(row, 'created_at'),
+    updatedAt: readTimestamp(row, 'updated_at'),
+  };
+}
+
 
 function asRecord(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AgentlinkError(500, 'AL_REPOSITORY_MAPPING', `${label} row is not an object`);

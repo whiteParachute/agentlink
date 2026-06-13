@@ -979,6 +979,55 @@ FROM updated_lease l
 JOIN updated_run r ON r.id = l.run_id
 JOIN updated_task t ON t.id = r.task_id;
 `,
+
+  findMainUserProfile: `
+SELECT row_to_json(p) AS main_user
+FROM al_main_user_profile p
+WHERE p.singleton_key = 'main';
+`,
+
+  upsertMainUserProfile: `
+WITH upserted AS (
+  INSERT INTO al_main_user_profile (
+    singleton_key,
+    display_name,
+    locale,
+    timezone,
+    metadata,
+    retention_class,
+    memory_space,
+    source_system,
+    sensitivity,
+    created_at,
+    updated_at
+  ) VALUES (
+    'main',
+    $1,
+    $2,
+    $3,
+    $4::jsonb,
+    $5::al_retention_class,
+    $6,
+    $7,
+    $8::al_sensitivity,
+    now(),
+    now()
+  )
+  ON CONFLICT (singleton_key) DO UPDATE SET
+    display_name = EXCLUDED.display_name,
+    locale = EXCLUDED.locale,
+    timezone = EXCLUDED.timezone,
+    metadata = EXCLUDED.metadata,
+    retention_class = EXCLUDED.retention_class,
+    memory_space = EXCLUDED.memory_space,
+    source_system = EXCLUDED.source_system,
+    sensitivity = EXCLUDED.sensitivity,
+    updated_at = now()
+  RETURNING *
+)
+SELECT row_to_json(p) AS main_user
+FROM upserted p;
+`,
 } as const;
 
 export type PostgreSqlStatementName = keyof typeof PostgreSqlStatements;

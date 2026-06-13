@@ -6,6 +6,7 @@ import type {
   Domain,
   JsonRecord,
   LeaseRecord,
+  MainUserRecord,
   PolicyDecisionRecord,
   RecoverDecision,
   RecoverableRunRecord,
@@ -19,6 +20,7 @@ import type {
 import { evaluateDispatchPolicy } from '../domain/policy.js';
 import {
   EVENT_RETENTION_DEFAULTS,
+  MAIN_USER_RETENTION_DEFAULTS,
   TASK_RETENTION_DEFAULTS,
   normalizeRetentionMetadata,
   withoutRawRetention,
@@ -115,6 +117,7 @@ export class InMemoryControlPlane {
   private readonly controlActions = new Map<string, ControlActionRecord>();
   private readonly taskIdempotency = new Map<string, IdempotencyEntry>();
   private readonly events = new Map<string, Map<number, RunEventRecord>>();
+  private mainUser: MainUserRecord | undefined;
 
   constructor(options: ControlPlaneOptions = {}) {
     this.now = options.now ?? (() => new Date());
@@ -361,6 +364,55 @@ export class InMemoryControlPlane {
     };
     this.workdirGrants.set(grant.id, revoked);
     return revoked;
+  }
+
+  getMainUserProfile(): MainUserRecord | undefined {
+    return this.mainUser;
+  }
+
+  upsertMainUserProfile(input: {
+    displayName?: string;
+    locale?: string;
+    timezone?: string;
+    metadata?: JsonRecord;
+    retention?: RetentionMetadataInput;
+  }): { mainUser: MainUserRecord; created: boolean } {
+    const retention = normalizeRetentionMetadata(input.retention, MAIN_USER_RETENTION_DEFAULTS);
+    const now = this.timestamp();
+    const existing = this.mainUser;
+
+    if (!existing) {
+      const created: MainUserRecord = {
+        id: 'main',
+        displayName: input.displayName ?? 'Main User',
+        locale: input.locale ?? 'zh-CN',
+        timezone: input.timezone ?? 'Asia/Shanghai',
+        metadata: input.metadata ?? {},
+        retentionClass: retention.retentionClass,
+        memorySpace: retention.memorySpace,
+        sourceSystem: retention.sourceSystem,
+        sensitivity: retention.sensitivity,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.mainUser = created;
+      return { mainUser: created, created: true };
+    }
+
+    const updated: MainUserRecord = {
+      ...existing,
+      displayName: input.displayName ?? existing.displayName,
+      locale: input.locale ?? existing.locale,
+      timezone: input.timezone ?? existing.timezone,
+      metadata: input.metadata ?? existing.metadata,
+      retentionClass: retention.retentionClass,
+      memorySpace: retention.memorySpace,
+      sourceSystem: retention.sourceSystem,
+      sensitivity: retention.sensitivity,
+      updatedAt: now,
+    };
+    this.mainUser = updated;
+    return { mainUser: updated, created: false };
   }
 
   revokeDevice(deviceId: string, reason = 'device_revoked'): { device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] } {

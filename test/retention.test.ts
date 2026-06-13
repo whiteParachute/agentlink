@@ -10,6 +10,7 @@ import {
   RetentionMetadataError,
   TASK_RETENTION_DEFAULTS,
   EVENT_RETENTION_DEFAULTS,
+  MAIN_USER_RETENTION_DEFAULTS,
   isRetentionClass,
   isSensitivity,
   isRetentionIdentifier,
@@ -201,4 +202,23 @@ void test('omitting retention produces same normalized form as explicit defaults
     TASK_RETENTION_DEFAULTS,
   );
   assert.deepEqual(a, b);
+});
+
+void test('MAIN_USER_RETENTION_DEFAULTS use operational/default/agentlink/internal', () => {
+  const d = MAIN_USER_RETENTION_DEFAULTS;
+  assert.equal(d.retentionClass, 'operational');
+  assert.equal(d.memorySpace, 'default');
+  assert.equal(d.sourceSystem, 'agentlink');
+  assert.equal(d.sensitivity, 'internal');
+});
+
+void test('normalizeRetentionMetadata with MAIN_USER defaults produces consistent output', () => {
+  const a = normalizeRetentionMetadata(undefined, MAIN_USER_RETENTION_DEFAULTS);
+  const b = normalizeRetentionMetadata(
+    { retentionClass: 'operational', memorySpace: 'default', sourceSystem: 'agentlink', sensitivity: 'internal' },
+    MAIN_USER_RETENTION_DEFAULTS,
+  );
+  assert.deepEqual(a, b);
+  assert.equal(a.retentionClass, 'operational');
+  assert.equal(a.memorySpace, 'default');
 });

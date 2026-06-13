@@ -547,3 +547,73 @@ test('raw payload content can coexist with retention metadata (unique raw guard)
   assert.equal(created.task.retentionClass, 'operational');
   assert.ok(created.run.retentionClass);
 });
+
+test('main user profile starts undefined', () => {
+  const controlPlane = new InMemoryControlPlane();
+  assert.equal(controlPlane.getMainUserProfile(), undefined);
+});
+
+test('main user profile creates on first upsert and returns created=true', () => {
+  const controlPlane = new InMemoryControlPlane({ now: () => new Date('2026-06-12T00:00:00.000Z') });
+  const result = controlPlane.upsertMainUserProfile({ displayName: 'Alice' });
+  assert.equal(result.created, true);
+  assert.equal(result.mainUser.id, 'main');
+  assert.equal(result.mainUser.displayName, 'Alice');
+  assert.equal(result.mainUser.locale, 'zh-CN');
+  assert.equal(result.mainUser.timezone, 'Asia/Shanghai');
+  assert.equal(result.mainUser.retentionClass, 'operational');
+  assert.equal(result.mainUser.memorySpace, 'default');
+  assert.equal(result.mainUser.sourceSystem, 'agentlink');
+  assert.equal(result.mainUser.sensitivity, 'internal');
+  assert.equal(result.mainUser.createdAt, '2026-06-12T00:00:00.000Z');
+  assert.equal(result.mainUser.updatedAt, '2026-06-12T00:00:00.000Z');
+});
+
+test('main user profile update returns created=false and preserves createdAt', () => {
+  const controlPlane = new InMemoryControlPlane({ now: () => new Date('2026-06-12T00:00:00.000Z') });
+  const first = controlPlane.upsertMainUserProfile({ displayName: 'Alice' });
+  const second = controlPlane.upsertMainUserProfile({ displayName: 'Alice Updated', locale: 'zh-CN' });
+  assert.equal(second.created, false);
+  assert.equal(second.mainUser.displayName, 'Alice Updated');
+  assert.equal(second.mainUser.locale, 'zh-CN');
+  assert.equal(second.mainUser.createdAt, first.mainUser.createdAt);
+});
+
+test('main user profile upsert preserves unspecified fields', () => {
+  const controlPlane = new InMemoryControlPlane();
+  controlPlane.upsertMainUserProfile({ displayName: 'Alice', locale: 'en-US', timezone: 'UTC', metadata: { theme: 'dark' } });
+  const updated = controlPlane.upsertMainUserProfile({ displayName: 'Bob' });
+  assert.equal(updated.mainUser.displayName, 'Bob');
+  assert.equal(updated.mainUser.locale, 'en-US');
+  assert.equal(updated.mainUser.timezone, 'UTC');
+  assert.deepEqual(updated.mainUser.metadata, { theme: 'dark' });
+});
+
+test('main user profile get returns same object as last upsert', () => {
+  const controlPlane = new InMemoryControlPlane();
+  const upserted = controlPlane.upsertMainUserProfile({ displayName: 'Alice' });
+  const got = controlPlane.getMainUserProfile();
+  assert.ok(got);
+  assert.equal(got.id, upserted.mainUser.id);
+  assert.equal(got.displayName, upserted.mainUser.displayName);
+});
+
+test('main user profile has retention metadata', () => {
+  const controlPlane = new InMemoryControlPlane();
+  const result = controlPlane.upsertMainUserProfile({ displayName: 'Alice' });
+  assert.equal(result.mainUser.retentionClass, 'operational');
+  assert.equal(result.mainUser.memorySpace, 'default');
+  assert.equal(result.mainUser.sourceSystem, 'agentlink');
+  assert.equal(result.mainUser.sensitivity, 'internal');
+});
+
+test('main user profile id is always main (singleton)', () => {
+  const controlPlane = new InMemoryControlPlane();
+  const first = controlPlane.upsertMainUserProfile({ displayName: 'A' });
+  const second = controlPlane.upsertMainUserProfile({ displayName: 'B' });
+  assert.equal(first.mainUser.id, 'main');
+  assert.equal(second.mainUser.id, 'main');
+  const got = controlPlane.getMainUserProfile();
+  assert.ok(got);
+  assert.equal(got.id, 'main');
+});

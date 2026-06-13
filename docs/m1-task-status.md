@@ -166,3 +166,15 @@ See `docs/m1-control-plane-reuse-boundary.md` for the per-object classification,
 - Artifact and audit objects have schema-level retention defaults/types but no writer API yet (no M1 writer requirement for this slice).
 - Remaining gaps: live PostgreSQL DSN smoke of the retention columns, migration invariant tests for artifact/audit retention defaults, and no MemoryBridge / work-personal interop / legacy import (intentionally out of scope for this slice).
 - `memory_space = 'default'` is the current M1 instance default memory space. It does **not** imply work/personal domain mapping; M1 has no MemoryBridge and no work-personal memory flow. The `default` space is a placeholder for the single-instance personal deployment and will be replaced by domain-aligned space names in M2+.
+
+## 2026-06-13 AL-M1-003 MainUser singleton profile update
+
+- Added the AL-M1-003 singleton `MainUser` profile model. `MainUserRecord` is fixed to `id = 'main'` and carries `displayName`, `locale`, `timezone`, `metadata`, AL-M1-002 retention metadata, and created/updated timestamps. It intentionally has no `domain` field, so it cannot be interpreted as per-work/per-personal or multi-user state.
+- Added `MAIN_USER_RETENTION_DEFAULTS` (`operational` / `default` / `agentlink` / `internal`) and applied it to the MainUser profile as a long-lived persisted object.
+- Updated `migrations/0001_initial.sql` with `al_main_user_profile`, guarded by `singleton_key text PRIMARY KEY DEFAULT 'main' CHECK (singleton_key = 'main')`; no ChannelUser, PlatformIdentity, GroupProfile, Entry, SourceEvent, Session, Memory, or MemoryBridge tables were added.
+- Wired the profile through the control-plane port, in-memory implementation, PostgreSQL statements/repository, PostgreSQL adapter, and HTTP API:
+  - `GET /api/v1/main-user/profile` returns `404 AL_MAIN_USER_NOT_FOUND` before initialization and `200` after initialization.
+  - `POST /api/v1/main-user/profile` initializes or updates the singleton profile, returning `201` on first create and `200` on update, with `created` and `main_user` in the response.
+- Request DTOs stay snake_case (`display_name`, `locale`, `timezone`, `metadata`, `retention`); profile strings must be non-empty when supplied, `metadata` must be an object, and invalid retention values return `400 AL_BAD_REQUEST`.
+- Test count: 187. Tests cover MainUser retention defaults, migration singleton/table/out-of-scope invariants, in-memory create/read/update/singleton behavior, PostgreSQL statement shape, repository mapping/upsert/merge/invalid-retention behavior, and HTTP 404/201/200/400 flows.
+- Remaining gaps: no live PostgreSQL DSN smoke in this environment; MainUser is only the singleton profile anchor and does not implement ChannelUser / platform identity binding / GroupProfile / Entry / SourceEvent / Session / Memory / MemoryBridge / work-personal interop.

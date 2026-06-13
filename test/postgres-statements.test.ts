@@ -258,3 +258,32 @@ test('task find statements include retention through row_to_json envelope', () =
   assert.match(PostgreSqlStatements.findRunById, /row_to_json\(r\)/i);
   assert.match(PostgreSqlStatements.findRunById, /FROM al_run r/i);
 });
+
+test('main user find statement selects from al_main_user_profile with singleton key', () => {
+  assert.match(PostgreSqlStatements.findMainUserProfile, /FROM al_main_user_profile/i);
+  assert.match(PostgreSqlStatements.findMainUserProfile, /singleton_key = 'main'/i);
+  assert.match(PostgreSqlStatements.findMainUserProfile, /row_to_json\(p\)/i);
+});
+
+test('main user upsert statement uses ON CONFLICT and singleton_key', () => {
+  const sql = PostgreSqlStatements.upsertMainUserProfile;
+  assert.match(sql, /WITH upserted AS/i);
+  assert.match(sql, /INSERT INTO al_main_user_profile/i);
+  assert.match(sql, /singleton_key/i);
+  assert.match(sql, /ON CONFLICT \(singleton_key\) DO UPDATE/i);
+  assert.match(sql, /retention_class/i);
+  assert.match(sql, /memory_space/i);
+  assert.match(sql, /source_system/i);
+  assert.match(sql, /sensitivity/i);
+  assert.match(sql, /RETURNING \*/i);
+  assert.match(sql, /SELECT row_to_json\(p\) AS main_user/i);
+  assert.match(sql, /FROM upserted p/i);
+});
+
+test('main user upsert writes repository-merged profile fields on conflict', () => {
+  const sql = PostgreSqlStatements.upsertMainUserProfile;
+  assert.match(sql, /display_name = EXCLUDED\.display_name/i);
+  assert.match(sql, /locale = EXCLUDED\.locale/i);
+  assert.match(sql, /timezone = EXCLUDED\.timezone/i);
+  assert.match(sql, /metadata = EXCLUDED\.metadata/i);
+});

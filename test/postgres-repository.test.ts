@@ -4,7 +4,7 @@ import { AgentlinkError } from '../src/control-plane/errors.js';
 import { PostgreSqlRepository, createTaskIdempotencySignature } from '../src/db/postgres-repository.js';
 import { PostgreSqlStatements } from '../src/db/postgres-statements.js';
 import { hashStable } from '../src/domain/signature.js';
-import { TASK_RETENTION_DEFAULTS, RetentionMetadataError, normalizeRetentionMetadata } from '../src/domain/retention.js';
+import { TASK_RETENTION_DEFAULTS, MAIN_USER_RETENTION_DEFAULTS, RetentionMetadataError, normalizeRetentionMetadata } from '../src/domain/retention.js';
 import type { SqlClient, SqlQueryResult } from '../src/db/transaction.js';
 
 const NOW = '2026-06-11T00:00:00.000Z';
@@ -793,4 +793,123 @@ test('PostgreSqlRepository renews leases, acknowledges control actions, and appl
   assert.equal(discarded.task.status, 'QUEUED');
   assert.equal(discarded.retryRun?.attemptNo, 2);
   assert.deepEqual(discardClient.calls.map((call) => call.sql), ['BEGIN', PostgreSqlStatements.recoverDiscard, PostgreSqlStatements.createRetryRunAttempt, 'COMMIT']);
+});
+
+function mainUserRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    singleton_key: 'main',
+    display_name: 'Main User',
+    locale: 'zh-CN',
+    timezone: 'Asia/Shanghai',
+    metadata: { theme: 'dark' },
+    retention_class: 'operational',
+    memory_space: 'default',
+    source_system: 'agentlink',
+    sensitivity: 'internal',
+    created_at: NOW,
+    updated_at: NOW,
+    ...overrides,
+  };
+}
+
+test('postgres repository maps main user row correctly', async () => {
+  const client = new ScriptedSqlClient();
+  client.enqueue(one({ main_user: mainUserRow() }));
+  const repo = new PostgreSqlRepository(client);
+  const result = await repo.getMainUserProfile();
+  assert.ok(result);
+  assert.equal(result.id, 'main');
+  assert.equal(result.displayName, 'Main User');
+  assert.equal(result.locale, 'zh-CN');
+  assert.equal(result.timezone, 'Asia/Shanghai');
+  assert.deepEqual(result.metadata, { theme: 'dark' });
+  assert.equal(result.retentionClass, 'operational');
+  assert.equal(result.memorySpace, 'default');
+  assert.equal(result.sourceSystem, 'agentlink');
+  assert.equal(result.sensitivity, 'internal');
+  assert.equal(result.createdAt, NOW);
+  assert.equal(result.updatedAt, NOW);
+});
+
+test('postgres repository getMainUserProfile returns undefined when not found', async () => {
+  const client = new ScriptedSqlClient();
+  client.enqueue(none());
+  const repo = new PostgreSqlRepository(client);
+  const result = await repo.getMainUserProfile();
+  assert.equal(result, undefined);
+});
+
+test('postgres repository upsertMainUserProfile creates on first call', async () => {
+  const client = new ScriptedSqlClient();
+  // getMainUserProfile returns empty
+  client.enqueue(none());
+  // upsert returns new row
+  client.enqueue(one({ main_user: mainUserRow({ display_name: 'Alice' }) }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+  const result = await repo.upsertMainUserProfile({ displayName: 'Alice' });
+  assert.equal(result.created, true);
+  assert.equal(result.mainUser.displayName, 'Alice');
+  assert.equal(result.mainUser.id, 'main');
+  // Verify call order: find then upsert
+  assert.equal(client.calls.length, 2);
+  assert.equal(client.calls.at(0)?.sql, PostgreSqlStatements.findMainUserProfile);
+  assert.equal(client.calls.at(1)?.sql, PostgreSqlStatements.upsertMainUserProfile);
+});
+
+test('postgres repository upsertMainUserProfile returns created=false on update', async () => {
+  const client = new ScriptedSqlClient();
+  // existing row
+  client.enqueue(one({ main_user: mainUserRow({ display_name: 'Old' }) }));
+  // updated row
+  client.enqueue(one({ main_user: mainUserRow({ display_name: 'New' }) }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+  const result = await repo.upsertMainUserProfile({ displayName: 'New' });
+  assert.equal(result.created, false);
+  assert.equal(result.mainUser.displayName, 'New');
+});
+
+test('postgres repository upsertMainUserProfile merges unspecified fields with existing', async () => {
+  const client = new ScriptedSqlClient();
+  // Find returns existing with locale=en-US and theme=dark
+  client.enqueue(one({ main_user: mainUserRow({ locale: 'en-US', metadata: { theme: 'dark' } }) }));
+  // Upsert returns merged
+  client.enqueue(one({ main_user: mainUserRow({ display_name: 'Updated', locale: 'en-US', metadata: { theme: 'dark' } }) }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+  const result = await repo.upsertMainUserProfile({ displayName: 'Updated' });
+  assert.equal(result.created, false);
+  // Verify the upsert params include existing locale and metadata (merged)
+  const upsertCall = client.calls[1];
+  assert.ok(upsertCall);
+  const params = upsertCall.params as unknown[];
+  // $1 = displayName (Updated), $2 = locale (en-US from existing), $3 = timezone
+  assert.equal(params[0], 'Updated');
+  assert.equal(params[1], 'en-US');
+});
+
+test('postgres repository upsertMainUserProfile normalizes retention', async () => {
+  const client = new ScriptedSqlClient();
+  client.enqueue(none());
+  client.enqueue(one({ main_user: mainUserRow() }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+  await repo.upsertMainUserProfile({
+    displayName: 'Test',
+    retention: { memorySpace: 'personal', sensitivity: 'confidential' },
+  });
+  const upsertParams = client.calls[1]?.params as unknown[] | undefined;
+  assert.ok(upsertParams);
+  // $1=display_name, $2=locale, $3=timezone, $4=metadata, $5=retention_class, $6=memory_space, $7=source_system, $8=sensitivity
+  assert.equal(upsertParams[4], 'operational');
+  assert.equal(upsertParams[5], 'personal');
+  assert.equal(upsertParams[6], 'agentlink');
+  assert.equal(upsertParams[7], 'confidential');
+});
+
+test('postgres repository upsertMainUserProfile rejects invalid retention', async () => {
+  const client = new ScriptedSqlClient();
+  const repo = new PostgreSqlRepository(client);
+  await assert.rejects(
+    async () => repo.upsertMainUserProfile({ displayName: 'Test', retention: { retentionClass: 'invalid' as never } }),
+    (error: unknown) => error instanceof RetentionMetadataError,
+  );
+  assert.equal(client.calls.length, 0);
 });

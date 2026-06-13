@@ -3,6 +3,7 @@ import type {
   ControlActionRecord,
   DeviceRecord,
   LeaseRecord,
+  MainUserRecord,
   RecoverDecision,
   RecoverableRunRecord,
   RunEventRecord,
@@ -56,4 +57,12 @@ export interface AgentlinkControlPlanePort {
     error?: Record<string, unknown>;
     metrics?: Record<string, unknown>;
   }): MaybePromise<{ run: RunRecord; task: TaskRecord; lease: LeaseRecord }>;
+  getMainUserProfile(): MaybePromise<MainUserRecord | undefined>;
+  upsertMainUserProfile(input: {
+    displayName?: string;
+    locale?: string;
+    timezone?: string;
+    metadata?: Record<string, unknown>;
+    retention?: RetentionMetadataInput;
+  }): MaybePromise<{ mainUser: MainUserRecord; created: boolean }>;
 }

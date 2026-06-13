@@ -210,3 +210,17 @@ export interface RecoverableRunRecord {
 }
 
 export type RecoverDecision = 'continue' | 'discard';
+
+export interface MainUserRecord {
+  id: 'main';
+  displayName: string;
+  locale: string;
+  timezone: string;
+  metadata: JsonRecord;
+  retentionClass: RetentionClass;
+  memorySpace: string;
+  sourceSystem: string;
+  sensitivity: Sensitivity;
+  createdAt: string;
+  updatedAt: string;
+}

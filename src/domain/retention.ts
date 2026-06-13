@@ -130,6 +130,15 @@ export const EVENT_RETENTION_DEFAULTS: RetentionDefaults = {
   memorySpace: DEFAULT_MEMORY_SPACE,
   sourceSystem: AGENTLET_SOURCE_SYSTEM,
 };
+// Default retention boundary for the singleton MainUser profile: operational
+// state attributed to the agentlink control plane, internal by default.
+export const MAIN_USER_RETENTION_DEFAULTS: RetentionDefaults = {
+  retentionClass: 'operational',
+  sensitivity: 'internal',
+  memorySpace: DEFAULT_MEMORY_SPACE,
+  sourceSystem: DEFAULT_SOURCE_SYSTEM,
+};
+
 
 // Strip raw retention from an input object so idempotency signatures only
 // depend on normalized retention metadata. This ensures that omitting

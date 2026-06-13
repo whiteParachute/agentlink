@@ -102,3 +102,29 @@ for (const { table, defaultClass, defaultSource } of RETENTION_TABLES) {
     assert.match(sql, new RegExp(`ON ${table}\\(domain, memory_space, retention_class\\)`, 'i'));
   });
 }
+
+
+test('initial migration adds singleton main user profile table', () => {
+  const sql = loadInitialMigration();
+  assert.match(sql, /CREATE TABLE al_main_user_profile/i);
+  assert.match(sql, /singleton_key text PRIMARY KEY DEFAULT 'main' CHECK \(singleton_key = 'main'\)/i);
+  assert.match(sql, /display_name text NOT NULL DEFAULT 'Main User'/i);
+  assert.match(sql, /locale text NOT NULL DEFAULT 'zh-CN'/i);
+  assert.match(sql, /timezone text NOT NULL DEFAULT 'Asia\/Shanghai'/i);
+  assert.match(sql, /metadata jsonb NOT NULL DEFAULT '\{\}'::jsonb/i);
+});
+
+test('initial migration gives main user profile AL-M1-002 retention boundary columns', () => {
+  const sql = loadInitialMigration();
+  assert.match(sql, /CREATE TABLE al_main_user_profile[\s\S]*retention_class al_retention_class NOT NULL DEFAULT 'operational'/i);
+  assert.match(sql, /CREATE TABLE al_main_user_profile[\s\S]*memory_space text NOT NULL DEFAULT 'default' CHECK \(memory_space ~/i);
+  assert.match(sql, /CREATE TABLE al_main_user_profile[\s\S]*source_system text NOT NULL DEFAULT 'agentlink' CHECK \(source_system ~/i);
+  assert.match(sql, /CREATE TABLE al_main_user_profile[\s\S]*sensitivity al_sensitivity NOT NULL DEFAULT 'internal'/i);
+});
+
+test('initial migration keeps AL-M1-003 out-of-scope identity and memory tables absent', () => {
+  const sql = loadInitialMigration();
+  for (const table of ['al_channel_user', 'al_platform_identity', 'al_group_profile', 'al_entry', 'al_source_event', 'al_session', 'al_memory']) {
+    assert.doesNotMatch(sql, new RegExp(`CREATE TABLE ${table}`, 'i'));
+  }
+});

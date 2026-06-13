@@ -1,7 +1,7 @@
 import { AgentlinkError } from './errors.js';
 import type { AgentlinkControlPlanePort } from './port.js';
 import type { AgentletInstruction, CreateTaskInput, PullInput, RegisterDeviceInput } from './in-memory.js';
-import type { JsonRecord, LeaseRecord } from '../domain/entities.js';
+import type { JsonRecord, LeaseRecord, MainUserRecord } from '../domain/entities.js';
 import type { RetentionMetadataInput } from '../domain/retention.js';
 import { PostgreSqlRepository } from '../db/postgres-repository.js';
 import { PgRuntime } from '../db/pg-client.js';
@@ -60,6 +60,14 @@ export class PostgresControlPlane implements AgentlinkControlPlanePort {
 
   async revokeWorkdirGrant(grantId: string) {
     return await this.withRepository((repository) => repository.revokeWorkdirGrant(grantId));
+  }
+
+  async getMainUserProfile(): Promise<MainUserRecord | undefined> {
+    return await this.withRepository((repository) => repository.getMainUserProfile());
+  }
+
+  async upsertMainUserProfile(input: { displayName?: string; locale?: string; timezone?: string; metadata?: JsonRecord; retention?: RetentionMetadataInput }) {
+    return await this.withRepository((repository) => repository.upsertMainUserProfile(input));
   }
 
   async revokeDevice(deviceId: string, reason?: string) {

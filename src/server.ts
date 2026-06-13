@@ -5,7 +5,7 @@ import { InMemoryControlPlane, type CreateTaskInput, type RegisterDeviceInput } 
 import { PostgresControlPlane } from './control-plane/postgres.js';
 import type { AgentlinkControlPlanePort } from './control-plane/port.js';
 import { PgRuntime } from './db/pg-client.js';
-import type { CapabilityGrantRecord, DeviceRecord, JsonRecord, RunRecord, RunnerRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
+import type { CapabilityGrantRecord, DeviceRecord, JsonRecord, MainUserRecord, RunRecord, RunnerRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
 import { RetentionMetadataError, type RetentionMetadataInput } from './domain/retention.js';
 import type { RunStatus } from './domain/status.js';
 import { sendJson } from './http/json.js';
@@ -95,6 +95,31 @@ async function handleRequest(
         'agentlet-complete',
       ],
     });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/v1/main-user/profile') {
+    const mainUser = await controlPlane.getMainUserProfile();
+    if (!mainUser) throw new AgentlinkError(404, 'AL_MAIN_USER_NOT_FOUND', 'Main user profile not initialized');
+    sendJson(res, 200, { main_user: toMainUserDto(mainUser) });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v1/main-user/profile') {
+    const body = await readJsonRecord(req);
+    const displayName = optionalNonEmptyString(body, 'display_name');
+    const locale = optionalNonEmptyString(body, 'locale');
+    const timezone = optionalNonEmptyString(body, 'timezone');
+    const metadata = optionalRecord(body, 'metadata');
+    const retention = optionalRetention(body, 'retention');
+    const result = await controlPlane.upsertMainUserProfile({
+      ...(displayName ? { displayName } : {}),
+      ...(locale ? { locale } : {}),
+      ...(timezone ? { timezone } : {}),
+      ...(metadata ? { metadata } : {}),
+      ...(retention ? { retention } : {}),
+    });
+    sendJson(res, result.created ? 201 : 200, { main_user: toMainUserDto(result.mainUser), created: result.created });
     return;
   }
 
@@ -582,6 +607,25 @@ function toRunnerDto(runner: RunnerRecord) {
   };
 }
 
+function toMainUserDto(mainUser: MainUserRecord) {
+  const dto: Record<string, unknown> = {
+    id: mainUser.id,
+    display_name: mainUser.displayName,
+    metadata: mainUser.metadata,
+    retention: {
+      retention_class: mainUser.retentionClass,
+      memory_space: mainUser.memorySpace,
+      source_system: mainUser.sourceSystem,
+      sensitivity: mainUser.sensitivity,
+    },
+    created_at: mainUser.createdAt,
+    updated_at: mainUser.updatedAt,
+  };
+  if (mainUser.locale) dto.locale = mainUser.locale;
+  if (mainUser.timezone) dto.timezone = mainUser.timezone;
+  return dto;
+}
+
 async function ensureLeaseBelongsToDevice(controlPlane: AgentlinkControlPlanePort, leaseId: string, deviceId: string): Promise<void> {
   const lease = await controlPlane.getLease(leaseId);
   if (!lease) throw new AgentlinkError(404, 'AL_LEASE_NOT_FOUND', 'Lease not found');
@@ -635,6 +679,13 @@ function optionalString(body: JsonRecord, key: string): string | undefined {
   const value = body[key];
   if (value === undefined) return undefined;
   if (typeof value !== 'string') throw new AgentlinkError(400, 'AL_BAD_REQUEST', `${key} must be a string`);
+  return value;
+}
+
+function optionalNonEmptyString(body: JsonRecord, key: string): string | undefined {
+  const value = optionalString(body, key);
+  if (value === undefined) return undefined;
+  if (value.length === 0) throw new AgentlinkError(400, 'AL_BAD_REQUEST', `${key} must be a non-empty string`);
   return value;
 }
 
