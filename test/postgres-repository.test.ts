@@ -4,6 +4,7 @@ import { AgentlinkError } from '../src/control-plane/errors.js';
 import { PostgreSqlRepository, createTaskIdempotencySignature } from '../src/db/postgres-repository.js';
 import { PostgreSqlStatements } from '../src/db/postgres-statements.js';
 import { hashStable } from '../src/domain/signature.js';
+import { TASK_RETENTION_DEFAULTS, RetentionMetadataError, normalizeRetentionMetadata } from '../src/domain/retention.js';
 import type { SqlClient, SqlQueryResult } from '../src/db/transaction.js';
 
 const NOW = '2026-06-11T00:00:00.000Z';
@@ -40,6 +41,10 @@ function taskRow(overrides: Record<string, unknown> = {}): Record<string, unknow
     max_retries: 1,
     idempotency_key: 'idem-1',
     idempotency_signature: 'signature',
+    retention_class: 'operational',
+    memory_space: 'default',
+    source_system: 'agentlink',
+    sensitivity: 'internal',
     created_at: NOW,
     updated_at: NOW,
     ...overrides,
@@ -58,6 +63,10 @@ function runRow(overrides: Record<string, unknown> = {}): Record<string, unknown
     result: null,
     error: null,
     metrics: {},
+    retention_class: 'operational',
+    memory_space: 'default',
+    source_system: 'agentlink',
+    sensitivity: 'internal',
     current_lease_id: null,
     version: 1,
     created_at: NOW,
@@ -116,6 +125,10 @@ function eventRow(overrides: Record<string, unknown> = {}): Record<string, unkno
     domain: 'personal',
     event_type: 'STDOUT',
     payload: { text: 'hello' },
+    retention_class: 'short_term',
+    memory_space: 'default',
+    source_system: 'agentlet',
+    sensitivity: 'internal',
     emitted_at: NOW,
     ...overrides,
   };
@@ -212,7 +225,8 @@ function none(): SqlQueryResult<Record<string, unknown>> {
 
 test('PostgreSqlRepository creates a task/run and maps snake_case rows to domain records', async () => {
   const input = { source: 'telegram', sourceRef: 'telegram:chat:msg', payload: { text: 'hello' } };
-  const signature = createTaskIdempotencySignature('personal', input);
+  const retention = normalizeRetentionMetadata(undefined, TASK_RETENTION_DEFAULTS);
+  const signature = createTaskIdempotencySignature('personal', input, retention);
   const client = new ScriptedSqlClient();
   client.enqueue(none());
   client.enqueue(one({ task: taskRow({ idempotency_signature: signature }), run: runRow() }));
@@ -225,6 +239,63 @@ test('PostgreSqlRepository creates a task/run and maps snake_case rows to domain
   assert.equal(result.run.attemptNo, 1);
   assert.deepEqual(client.calls.map((call) => call.sql), ['BEGIN', PostgreSqlStatements.findTaskByIdempotencyKey, PostgreSqlStatements.createTaskWithInitialRun, 'COMMIT']);
   assert.equal(client.calls[2]?.params?.[8], signature);
+});
+
+test('PostgreSqlRepository replays existing task when idempotency key and signature match', async () => {
+  const input = { source: 'telegram', sourceRef: 'telegram:chat:msg', payload: { text: 'hello' } };
+  const retention = normalizeRetentionMetadata(undefined, TASK_RETENTION_DEFAULTS);
+  const signature = createTaskIdempotencySignature('personal', input, retention);
+  const client = new ScriptedSqlClient();
+  client.enqueue(one({ task: taskRow({ idempotency_signature: signature, idempotency_key: 'idem-replay' }), run: runRow() }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const result = await repo.createTaskWithInitialRun(input, 'idem-replay');
+
+  assert.equal(result.created, false);
+  assert.equal(result.task.idempotencySignature, signature);
+  assert.deepEqual(client.calls.map((call) => call.sql), ['BEGIN', PostgreSqlStatements.findTaskByIdempotencyKey, 'COMMIT']);
+});
+
+test('PostgreSqlRepository idempotency replay matches omitted vs explicit default retention', async () => {
+  const inputOmitted = { source: 'telegram', sourceRef: 'telegram:chat:msg', payload: { text: 'hello' } };
+  const inputExplicit = {
+    source: 'telegram',
+    sourceRef: 'telegram:chat:msg',
+    payload: { text: 'hello' },
+    retention: { retentionClass: 'operational', sensitivity: 'internal', memorySpace: 'default', sourceSystem: 'agentlink' },
+  };
+  const sigOmitted = createTaskIdempotencySignature('personal', inputOmitted, normalizeRetentionMetadata(undefined, TASK_RETENTION_DEFAULTS));
+  const sigExplicit = createTaskIdempotencySignature('personal', inputExplicit, normalizeRetentionMetadata(inputExplicit.retention, TASK_RETENTION_DEFAULTS));
+  assert.equal(sigOmitted, sigExplicit);
+});
+
+test('PostgreSqlRepository task/run/event records carry retention metadata (unique raw guard)', async () => {
+  const rawPayload = { text: 'raw user message', user_id: 12345, channel: 'private' };
+  const input = { source: 'telegram', sourceRef: 'telegram:chat:raw', payload: rawPayload };
+  const retention = normalizeRetentionMetadata(undefined, TASK_RETENTION_DEFAULTS);
+  const signature = createTaskIdempotencySignature('personal', input, retention);
+  const client = new ScriptedSqlClient();
+  client.enqueue(none());
+  client.enqueue(one({ task: taskRow({ idempotency_signature: signature, payload: rawPayload }), run: runRow({ payload: undefined, instruction: rawPayload }) }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const result = await repo.createTaskWithInitialRun(input, 'raw-guard-key');
+
+  assert.equal(result.created, true);
+  assert.equal(result.task.retentionClass, 'operational');
+  assert.equal(result.task.memorySpace, 'default');
+  assert.equal(result.task.sourceSystem, 'agentlink');
+  assert.equal(result.task.sensitivity, 'internal');
+  assert.equal(result.run.retentionClass, 'operational');
+  assert.equal(result.run.memorySpace, 'default');
+  // Raw payload is preserved in the task record
+  assert.deepEqual(result.task.payload, rawPayload);
+  // Create params include retention columns
+  const createParams = client.calls[2]?.params as readonly unknown[];
+  assert.equal(createParams?.[9], 'operational');
+  assert.equal(createParams?.[10], 'default');
+  assert.equal(createParams?.[11], 'agentlink');
+  assert.equal(createParams?.[12], 'internal');
 });
 
 test('PostgreSqlRepository registers devices with declared capabilities and grants', async () => {
@@ -382,6 +453,72 @@ test('PostgreSqlRepository classifies progress insert misses as replay, conflict
   );
 });
 
+test('PostgreSqlRepository appendAgentletProgress carries retention metadata with agentlet defaults', async () => {
+  const client = new ScriptedSqlClient();
+  client.enqueue(one(eventRow()));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const event = await repo.appendAgentletProgress({
+    runId: 'run-1',
+    leaseId: 'lease-1',
+    seq: 1,
+    eventType: 'STDOUT',
+    payload: { text: 'hello' },
+  });
+
+  assert.equal(event.retentionClass, 'short_term');
+  assert.equal(event.sourceSystem, 'agentlet');
+  assert.equal(event.memorySpace, 'default');
+  assert.equal(event.sensitivity, 'internal');
+  // Raw payload is preserved through the mapper
+  assert.deepEqual(event.payload, { text: 'hello' });
+  // Verify retention params are passed to the SQL INSERT statement
+  const appendCall = client.calls.find((call) => call.sql === PostgreSqlStatements.appendAgentletProgress);
+  assert.ok(appendCall);
+  const params = appendCall.params as readonly unknown[];
+  assert.equal(params?.[5], 'short_term');
+  assert.equal(params?.[6], 'default');
+  assert.equal(params?.[7], 'agentlet');
+  assert.equal(params?.[8], 'internal');
+});
+
+test('PostgreSqlRepository appendAgentletProgress accepts explicit retention override', async () => {
+  const client = new ScriptedSqlClient();
+  client.enqueue(one(eventRow({ retention_class: 'artifact', sensitivity: 'public' })));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const event = await repo.appendAgentletProgress({
+    runId: 'run-1',
+    leaseId: 'lease-1',
+    seq: 1,
+    eventType: 'artifact',
+    payload: { hash: 'abc123' },
+    retention: { retentionClass: 'artifact', sensitivity: 'public' },
+  });
+
+  assert.equal(event.retentionClass, 'artifact');
+  assert.equal(event.sensitivity, 'public');
+});
+
+test('PostgreSqlRepository appendAgentletProgress rejects invalid retention', async () => {
+  const client = new ScriptedSqlClient();
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  await assert.rejects(
+    repo.appendAgentletProgress({
+      runId: 'run-1',
+      leaseId: 'lease-1',
+      seq: 1,
+      eventType: 'STDOUT',
+      payload: { text: 'hi' },
+      retention: { retentionClass: 'bogus' },
+    }),
+    (error) => error instanceof RetentionMetadataError && error.field === 'retention_class',
+  );
+  // No SQL calls should have been made
+  assert.equal(client.calls.length, 0);
+});
+
 test('PostgreSqlRepository evaluates static grants before leasing a queued run', async () => {
   const client = new ScriptedSqlClient();
   client.enqueue(one({ device: deviceRow() }));
@@ -454,6 +591,39 @@ test('PostgreSqlRepository completes retryable failures and creates the next att
   assert.equal(result.task.status, 'QUEUED');
   assert.equal(result.retryRun?.attemptNo, 2);
   assert.deepEqual(client.calls.map((call) => call.sql), ['BEGIN', PostgreSqlStatements.completeRun, PostgreSqlStatements.createRetryRunAttempt, 'COMMIT']);
+});
+
+test('PostgreSqlRepository retry run inherits retention metadata from task', async () => {
+  const client = new ScriptedSqlClient();
+  client.enqueue(one({
+    lease: leaseRow({ status: 'COMPLETED', terminal_payload_hash: 'hash', completed_at: NOW }),
+    run: runRow({ status: 'FAILED', error: { retryable: true }, finished_at: NOW, retention_class: 'short_term', source_system: 'agentlet' }),
+    task: taskRow({ status: 'FAILED', retry_count: 0, max_retries: 1, retention_class: 'operational', source_system: 'agentlink', sensitivity: 'confidential', memory_space: 'work.projectx' }),
+  }));
+  client.enqueue(one({
+    run: runRow({
+      id: '00000000-0000-4000-8000-000000000102',
+      status: 'QUEUED',
+      attempt_no: 2,
+      retry_of_run_id: '00000000-0000-4000-8000-000000000101',
+      retention_class: 'operational',
+      memory_space: 'work.projectx',
+      source_system: 'agentlink',
+      sensitivity: 'confidential',
+    }),
+    task: taskRow({ status: 'QUEUED', retry_count: 1, current_run_id: '00000000-0000-4000-8000-000000000102' }),
+  }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const result = await repo.completeRun({ runId: 'run-1', leaseId: 'lease-1', status: 'FAILED', error: { retryable: true } });
+
+  assert.equal(result.retryRun?.retentionClass, 'operational');
+  assert.equal(result.retryRun?.memorySpace, 'work.projectx');
+  assert.equal(result.retryRun?.sourceSystem, 'agentlink');
+  assert.equal(result.retryRun?.sensitivity, 'confidential');
+  // Retry run inherits from TASK, not from the old failed run
+  assert.notEqual(result.retryRun?.retentionClass, result.run.retentionClass);
+  assert.notEqual(result.retryRun?.sourceSystem, result.run.sourceSystem);
 });
 
 

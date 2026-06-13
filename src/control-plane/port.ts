@@ -11,6 +11,7 @@ import type {
   WorkdirAccessMode,
   WorkdirGrantRecord,
 } from '../domain/entities.js';
+import type { RetentionMetadataInput } from '../domain/retention.js';
 import type {
   AgentletInstruction,
   CreateTaskInput,
@@ -46,7 +47,7 @@ export interface AgentlinkControlPlanePort {
   decideRecovery(input: { deviceId: string; leaseId: string; decision: RecoverDecision; reason?: string }): MaybePromise<{ decision: RecoverDecision; lease: LeaseRecord; run: RunRecord; task: TaskRecord; retryRun?: RunRecord }>;
   ackLease(leaseId: string, accepted: boolean, reason?: string): MaybePromise<{ lease: LeaseRecord; run: RunRecord; task: TaskRecord }>;
   renewLease(leaseId: string): MaybePromise<{ lease: LeaseRecord; run: RunRecord; task: TaskRecord; controlActions: ControlActionRecord[] }>;
-  appendProgress(input: { runId: string; leaseId: string; seq: number; eventType: string; payload?: Record<string, unknown> }): MaybePromise<RunEventRecord>;
+  appendProgress(input: { runId: string; leaseId: string; seq: number; eventType: string; payload?: Record<string, unknown>; retention?: RetentionMetadataInput }): MaybePromise<RunEventRecord>;
   completeRun(input: {
     runId: string;
     leaseId: string;

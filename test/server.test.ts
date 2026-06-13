@@ -565,3 +565,322 @@ test('HTTP recover discard expires the lease and returns a retry run when allowe
     assert.notEqual(discarded.task.current_run_id, task.current_run_id);
   });
 });
+
+test('HTTP task endpoint accepts snake_case retention and returns it in response', async () => {
+  await withServer(async (baseUrl) => {
+    const response = await postJson(
+      baseUrl,
+      '/api/v1/tasks',
+      {
+        source: 'telegram',
+        source_ref: 'telegram:chat:ret1',
+        payload: { text: 'hi' },
+        retention: {
+          retention_class: 'memory_candidate',
+          sensitivity: 'confidential',
+          memory_space: 'work.projectx',
+          source_system: 'telegram',
+        },
+      },
+      { 'idempotency-key': 'ret-http-1' },
+    );
+    assert.equal(response.status, 201);
+    const body = (await response.json()) as { task: { retention: Record<string, string> }; run: { retention: Record<string, string> } };
+    assert.equal(body.task.retention.retention_class, 'memory_candidate');
+    assert.equal(body.task.retention.sensitivity, 'confidential');
+    assert.equal(body.task.retention.memory_space, 'work.projectx');
+    assert.equal(body.task.retention.source_system, 'telegram');
+    assert.equal(body.run.retention.retention_class, 'memory_candidate');
+    assert.equal(body.run.retention.memory_space, 'work.projectx');
+  });
+});
+
+test('HTTP task response includes default retention when none is provided', async () => {
+  await withServer(async (baseUrl) => {
+    const response = await postJson(
+      baseUrl,
+      '/api/v1/tasks',
+      { source: 'telegram', source_ref: 'telegram:chat:ret2', payload: { text: 'hi' } },
+      { 'idempotency-key': 'ret-http-default' },
+    );
+    assert.equal(response.status, 201);
+    const body = (await response.json()) as { task: { retention: Record<string, string> } };
+    assert.equal(body.task.retention.retention_class, 'operational');
+    assert.equal(body.task.retention.sensitivity, 'internal');
+    assert.equal(body.task.retention.memory_space, 'default');
+    assert.equal(body.task.retention.source_system, 'agentlink');
+  });
+});
+
+test('HTTP agentlet progress accepts snake_case retention and returns it', async () => {
+  await withServer(async (baseUrl) => {
+    const register = await postJson(baseUrl, '/api/v1/devices/register', {
+      display_name: 'ret-test',
+      owner_user_id: 'test',
+      capability_grants: ['codex:exec'],
+      workdir_grants: [{ path_prefix: DEFAULT_WORKSPACE, access_mode: 'read_write' }],
+    });
+    const registered = (await register.json()) as { device_id: string; runner_id: string; device_secret: string };
+    const auth = { authorization: `Bearer ${registered.device_secret}` };
+    await postJson(baseUrl, `/api/v1/devices/${registered.device_id}/heartbeat`, {}, auth);
+
+    const taskResp = await postJson(
+      baseUrl,
+      '/api/v1/tasks',
+      { source: 'http', source_ref: 'ret-progress', payload: { text: 'go' } },
+      { 'idempotency-key': 'ret-progress-key' },
+    );
+    const taskBody = (await taskResp.json()) as { task_id: string; current_run_id: string };
+
+    const pullResp = await postJson(
+      baseUrl,
+      '/api/v1/agentlet/pull',
+      { device_id: registered.device_id, runner_id: registered.runner_id, supported_capabilities: ['codex:exec'] },
+      auth,
+    );
+    const pulled = (await pullResp.json()) as { run_id: string; lease_id: string };
+    await postJson(baseUrl, '/api/v1/agentlet/ack', { device_id: registered.device_id, lease_id: pulled.lease_id, accepted: true }, auth);
+
+    const progResp = await postJson(
+      baseUrl,
+      '/api/v1/agentlet/progress',
+      {
+        device_id: registered.device_id,
+        run_id: pulled.run_id,
+        lease_id: pulled.lease_id,
+        seq: 1,
+        event_type: 'STDOUT',
+        payload: { text: 'hello' },
+        retention: { retention_class: 'artifact', sensitivity: 'public' },
+      },
+      auth,
+    );
+    assert.equal(progResp.status, 200);
+    const progBody = (await progResp.json()) as { event: { retention: Record<string, string> } };
+    assert.equal(progBody.event.retention.retention_class, 'artifact');
+    assert.equal(progBody.event.retention.sensitivity, 'public');
+    assert.equal(progBody.event.retention.source_system, 'agentlet');
+
+    // Verify GET /runs/:id/events returns retention
+    const eventsResp = await fetch(`${baseUrl}/api/v1/runs/${taskBody.current_run_id}/events`);
+    const eventsBody = (await eventsResp.json()) as { events: Array<{ retention: Record<string, string> }> };
+    assert.equal(eventsBody.events[0]?.retention.retention_class, 'artifact');
+  });
+});
+
+test('HTTP task creation returns 400 for invalid retention_class', async () => {
+  await withServer(async (baseUrl) => {
+    const response = await postJson(
+      baseUrl,
+      '/api/v1/tasks',
+      {
+        source: 'telegram',
+        source_ref: 'telegram:chat:badret',
+        payload: { text: 'hi' },
+        retention: { retention_class: 'bogus' },
+      },
+      { 'idempotency-key': 'ret-bad-class' },
+    );
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { error: { code: string; field?: string; message: string } };
+    assert.equal(body.error.code, 'AL_BAD_REQUEST');
+    assert.equal(body.error.field, 'retention_class');
+  });
+});
+
+test('HTTP task creation returns 400 for invalid sensitivity', async () => {
+  await withServer(async (baseUrl) => {
+    const response = await postJson(
+      baseUrl,
+      '/api/v1/tasks',
+      {
+        source: 'telegram',
+        source_ref: 'telegram:chat:badsens',
+        payload: { text: 'hi' },
+        retention: { sensitivity: 'top_secret' },
+      },
+      { 'idempotency-key': 'ret-bad-sens' },
+    );
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { error: { code: string; field?: string } };
+    assert.equal(body.error.field, 'sensitivity');
+  });
+});
+
+test('HTTP task creation returns 400 for invalid memory_space', async () => {
+  await withServer(async (baseUrl) => {
+    const response = await postJson(
+      baseUrl,
+      '/api/v1/tasks',
+      {
+        source: 'telegram',
+        source_ref: 'telegram:chat:badmem',
+        payload: { text: 'hi' },
+        retention: { memory_space: 'has space' },
+      },
+      { 'idempotency-key': 'ret-bad-mem' },
+    );
+    assert.equal(response.status, 400);
+    const body = (await response.json()) as { error: { field?: string } };
+    assert.equal(body.error.field, 'memory_space');
+  });
+});
+
+test('HTTP agentlet progress returns 400 for invalid source_system', async () => {
+  await withServer(async (baseUrl) => {
+    const register = await postJson(baseUrl, '/api/v1/devices/register', {
+      display_name: 'ret-src-test',
+      owner_user_id: 'test',
+      capability_grants: ['codex:exec'],
+      workdir_grants: [{ path_prefix: DEFAULT_WORKSPACE, access_mode: 'read_write' }],
+    });
+    const registered = (await register.json()) as { device_id: string; runner_id: string; device_secret: string };
+    const auth = { authorization: `Bearer ${registered.device_secret}` };
+    await postJson(baseUrl, `/api/v1/devices/${registered.device_id}/heartbeat`, {}, auth);
+
+    await postJson(
+      baseUrl,
+      '/api/v1/tasks',
+      { source: 'http', source_ref: 'ret-bad-src', payload: { text: 'go' } },
+      { 'idempotency-key': 'ret-bad-src-key' },
+    );
+
+    const pullResp = await postJson(
+      baseUrl,
+      '/api/v1/agentlet/pull',
+      { device_id: registered.device_id, runner_id: registered.runner_id },
+      auth,
+    );
+    const pulled = (await pullResp.json()) as { run_id: string; lease_id: string };
+    await postJson(baseUrl, '/api/v1/agentlet/ack', { device_id: registered.device_id, lease_id: pulled.lease_id, accepted: true }, auth);
+
+    const progResp = await postJson(
+      baseUrl,
+      '/api/v1/agentlet/progress',
+      {
+        device_id: registered.device_id,
+        run_id: pulled.run_id,
+        lease_id: pulled.lease_id,
+        seq: 1,
+        event_type: 'STDOUT',
+        retention: { source_system: 'bad system' },
+      },
+      auth,
+    );
+    assert.equal(progResp.status, 400);
+    const body = (await progResp.json()) as { error: { field?: string } };
+    assert.equal(body.error.field, 'source_system');
+  });
+});
+
+test('HTTP idempotency replay works with omitted vs explicit default retention', async () => {
+  await withServer(async (baseUrl) => {
+    const first = await postJson(
+      baseUrl,
+      '/api/v1/tasks',
+      { source: 'telegram', source_ref: 'telegram:chat:replay', payload: { text: 'hi' } },
+      { 'idempotency-key': 'ret-replay-key' },
+    );
+    assert.equal(first.status, 201);
+
+    const replay = await postJson(
+      baseUrl,
+      '/api/v1/tasks',
+      {
+        source: 'telegram',
+        source_ref: 'telegram:chat:replay',
+        payload: { text: 'hi' },
+        retention: {
+          retention_class: 'operational',
+          sensitivity: 'internal',
+          memory_space: 'default',
+          source_system: 'agentlink',
+        },
+      },
+      { 'idempotency-key': 'ret-replay-key' },
+    );
+    assert.equal(replay.status, 200);
+    const firstBody = (await first.json()) as { task_id: string };
+    const replayBody = (await replay.json()) as { task_id: string };
+    assert.equal(replayBody.task_id, firstBody.task_id);
+  });
+});
+
+test('HTTP task API preserves raw payload alongside retention metadata (unique raw guard)', async () => {
+  await withServer(async (baseUrl) => {
+    const rawPayload = { text: 'raw user message', user_id: 12345, channel: 'private', extra: { nested: true } };
+    const response = await postJson(
+      baseUrl,
+      '/api/v1/tasks',
+      { source: 'telegram', source_ref: 'telegram:chat:raw-guard', payload: rawPayload },
+      { 'idempotency-key': 'raw-guard-key' },
+    );
+    assert.equal(response.status, 201);
+    const body = (await response.json()) as {
+      task: { payload: Record<string, unknown>; retention: Record<string, string> };
+      run: { retention: Record<string, string> };
+    };
+    // Raw payload is preserved
+    assert.deepEqual(body.task.payload, rawPayload);
+    // Retention metadata is always present
+    assert.equal(body.task.retention.retention_class, 'operational');
+    assert.equal(body.task.retention.sensitivity, 'internal');
+    assert.equal(body.task.retention.memory_space, 'default');
+    assert.equal(body.task.retention.source_system, 'agentlink');
+    // Run inherits retention from task
+    assert.equal(body.run.retention.retention_class, 'operational');
+  });
+});
+
+test('HTTP progress API preserves raw payload alongside retention metadata', async () => {
+  await withServer(async (baseUrl) => {
+    const register = await postJson(baseUrl, '/api/v1/devices/register', {
+      display_name: 'raw-guard-device',
+      owner_user_id: 'whiteParachute',
+      agentlet_version: 'test-agentlet',
+      capability_grants: ['codex:exec'],
+      workdir_grants: [{ path_prefix: DEFAULT_WORKSPACE, access_mode: 'read_write' }],
+    });
+    assert.equal(register.status, 201);
+    const registered = (await register.json()) as { device_id: string; runner_id: string; device_secret: string };
+    const auth = { authorization: `Bearer ${registered.device_secret}` };
+
+    await postJson(baseUrl, `/api/v1/devices/${registered.device_id}/heartbeat`, {}, auth);
+    await postJson(
+      baseUrl,
+      '/api/v1/tasks',
+      { source: 'http', source_ref: 'progress-raw-guard', payload: { text: 'go' } },
+      { 'idempotency-key': 'progress-raw-guard-key' },
+    );
+
+    const pull = await postJson(
+      baseUrl,
+      '/api/v1/agentlet/pull',
+      { device_id: registered.device_id, runner_id: registered.runner_id, supported_capabilities: ['codex:exec'] },
+      auth,
+    );
+    assert.equal(pull.status, 200);
+    const pulled = (await pull.json()) as { run_id: string; lease_id: string };
+    await postJson(baseUrl, '/api/v1/agentlet/ack', { device_id: registered.device_id, lease_id: pulled.lease_id, accepted: true }, auth);
+
+    const rawPayload = { text: 'raw stdout line', file_path: '/tmp/foo', line_no: 42 };
+    const progResp = await postJson(
+      baseUrl,
+      '/api/v1/agentlet/progress',
+      {
+        device_id: registered.device_id,
+        run_id: pulled.run_id,
+        lease_id: pulled.lease_id,
+        seq: 1,
+        event_type: 'STDOUT',
+        payload: rawPayload,
+      },
+      auth,
+    );
+    assert.equal(progResp.status, 200);
+    const progBody = (await progResp.json()) as { event: { payload: Record<string, unknown>; retention: Record<string, string> } };
+    assert.deepEqual(progBody.event.payload, rawPayload);
+    assert.equal(progBody.event.retention.retention_class, 'short_term');
+    assert.equal(progBody.event.retention.source_system, 'agentlet');
+  });
+});

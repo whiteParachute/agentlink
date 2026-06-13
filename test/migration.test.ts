@@ -64,3 +64,41 @@ test('initial migration includes active grant lookup indexes for AL-TD-003 polic
   assert.match(sql, /CREATE UNIQUE INDEX uq_al_workdir_grant_active_device/i);
   assert.match(sql, /ON al_workdir_grant\(domain, device_id, path_prefix, access_mode\)/i);
 });
+
+test('initial migration includes AL-M1-002 retention metadata enums', () => {
+  const sql = loadInitialMigration();
+  assert.match(sql, /CREATE TYPE al_retention_class AS ENUM \('short_term', 'operational', 'artifact', 'audit', 'memory_candidate', 'memory'\)/i);
+  assert.match(sql, /CREATE TYPE al_sensitivity AS ENUM \('public', 'internal', 'confidential', 'secret'\)/i);
+});
+
+test('initial migration does not modify al_domain enum', () => {
+  const sql = loadInitialMigration();
+  assert.match(sql, /CREATE TYPE al_domain AS ENUM \('personal', 'work'\)/i);
+});
+
+const RETENTION_TABLES = [
+  { table: 'al_task', defaultClass: 'operational', defaultSource: 'agentlink' },
+  { table: 'al_run', defaultClass: 'operational', defaultSource: 'agentlink' },
+  { table: 'al_run_event', defaultClass: 'short_term', defaultSource: 'agentlet' },
+  { table: 'al_artifact', defaultClass: 'artifact', defaultSource: 'agentlink' },
+  { table: 'al_audit_log', defaultClass: 'audit', defaultSource: 'agentlink' },
+];
+
+for (const { table, defaultClass, defaultSource } of RETENTION_TABLES) {
+  test(`initial migration adds four retention columns on ${table} with defaults and CHECKs`, () => {
+    const sql = loadInitialMigration();
+    // Columns exist with enum types
+    assert.match(sql, new RegExp(`retention_class al_retention_class NOT NULL DEFAULT '${defaultClass}'`, 'i'));
+    assert.match(sql, new RegExp(`memory_space text NOT NULL DEFAULT 'default'.*CHECK \\(memory_space ~`, 'si'));
+    assert.match(sql, new RegExp(`source_system text NOT NULL DEFAULT '${defaultSource}'.*CHECK \\(source_system ~`, 'si'));
+    assert.match(sql, /sensitivity al_sensitivity NOT NULL DEFAULT 'internal'/i);
+    // identifier regex pattern is the same across tables
+    assert.match(sql, /\^\[A-Za-z0-9\]\[A-Za-z0-9._:-\]\{0,127\}\$/);
+  });
+
+  test(`initial migration includes retention lookup index on ${table}`, () => {
+    const sql = loadInitialMigration();
+    assert.match(sql, new RegExp(`CREATE INDEX idx_al_${table.slice(3)}_retention`, 'i'));
+    assert.match(sql, new RegExp(`ON ${table}\\(domain, memory_space, retention_class\\)`, 'i'));
+  });
+}

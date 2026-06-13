@@ -35,6 +35,10 @@ WITH inserted_task AS (
     max_retries,
     idempotency_key,
     idempotency_signature,
+    retention_class,
+    memory_space,
+    source_system,
+    sensitivity,
     created_at,
     updated_at
   ) VALUES (
@@ -49,8 +53,12 @@ WITH inserted_task AS (
     $7,
     $8,
     $9,
-    $10,
-    $10
+    $10::al_retention_class,
+    $11,
+    $12,
+    $13::al_sensitivity,
+    $14,
+    $14
   )
   RETURNING *
 ), inserted_run AS (
@@ -61,15 +69,21 @@ WITH inserted_task AS (
     status,
     attempt_no,
     instruction,
+    retention_class,
+    memory_space,
+    source_system,
+    sensitivity,
     created_at,
     updated_at
   )
-  SELECT $11, t.id, t.domain, 'QUEUED', 1, $12::jsonb, $10, $10
+  SELECT $15, t.id, t.domain, 'QUEUED', 1, $16::jsonb,
+         t.retention_class, t.memory_space, t.source_system, t.sensitivity,
+         $14, $14
   FROM inserted_task t
   RETURNING *
 ), updated_task AS (
   UPDATE al_task t
-  SET current_run_id = r.id, updated_at = $10
+  SET current_run_id = r.id, updated_at = $14
   FROM inserted_run r
   WHERE t.id = r.task_id
   RETURNING t.*
@@ -581,8 +595,8 @@ JOIN selected_task t ON t.id = r.task_id;
 `,
 
   appendAgentletProgress: `
-INSERT INTO al_run_event (run_id, seq, domain, event_type, payload, emitted_at)
-SELECT r.id, $3, r.domain, $4, $5::jsonb, $6
+INSERT INTO al_run_event (run_id, seq, domain, event_type, payload, retention_class, memory_space, source_system, sensitivity, emitted_at)
+SELECT r.id, $3, r.domain, $4, $5::jsonb, $6::al_retention_class, $7, $8, $9::al_sensitivity, $10
 FROM al_run r
 JOIN al_run_lease l ON l.id = $2 AND l.run_id = r.id
 WHERE r.id = $1
@@ -701,6 +715,10 @@ WITH previous_run AS (
     retry_of_run_id,
     instruction,
     metrics,
+    retention_class,
+    memory_space,
+    source_system,
+    sensitivity,
     created_at,
     updated_at
   )
@@ -713,6 +731,10 @@ WITH previous_run AS (
     previous.id,
     previous.instruction,
     '{}'::jsonb,
+    t.retention_class,
+    t.memory_space,
+    t.source_system,
+    t.sensitivity,
     $3,
     $3
   FROM target_task t

@@ -1,3 +1,4 @@
+import type { RetentionClass, Sensitivity } from './retention.js';
 import type { DeviceStatus, LeaseStatus, RunStatus, TaskStatus } from './status.js';
 
 export type Domain = 'personal' | 'work';
@@ -16,6 +17,10 @@ export interface TaskRecord {
   maxRetries: number;
   idempotencyKey: string;
   idempotencySignature: string;
+  retentionClass: RetentionClass;
+  memorySpace: string;
+  sourceSystem: string;
+  sensitivity: Sensitivity;
   createdAt: string;
   updatedAt: string;
 }
@@ -33,6 +38,10 @@ export interface RunRecord {
   result?: JsonRecord;
   error?: JsonRecord;
   metrics: JsonRecord;
+  retentionClass: RetentionClass;
+  memorySpace: string;
+  sourceSystem: string;
+  sensitivity: Sensitivity;
   version: number;
   createdAt: string;
   updatedAt: string;
@@ -137,7 +146,44 @@ export interface RunEventRecord {
   domain: Domain;
   eventType: string;
   payload: JsonRecord;
+  retentionClass: RetentionClass;
+  memorySpace: string;
+  sourceSystem: string;
+  sensitivity: Sensitivity;
   emittedAt: string;
+}
+
+// AL-M1-002: artifact / audit retention metadata types. These objects have no
+// writer API in M1; the types and schema-level defaults/invariants document the
+// retention boundary so later slices can wire writers without redefining it.
+export interface ArtifactRecord {
+  domain: Domain;
+  hash: string;
+  kind: string;
+  size: number;
+  storageType: 'inline' | 'ref';
+  uri?: string;
+  retentionClass: RetentionClass;
+  memorySpace: string;
+  sourceSystem: string;
+  sensitivity: Sensitivity;
+  createdAt: string;
+}
+
+export interface AuditLogRecord {
+  id: string;
+  domain: Domain;
+  actor: string;
+  action: string;
+  targetType: string;
+  targetId: string;
+  result: string;
+  metadata: JsonRecord;
+  retentionClass: RetentionClass;
+  memorySpace: string;
+  sourceSystem: string;
+  sensitivity: Sensitivity;
+  createdAt: string;
 }
 
 export interface ControlActionRecord {

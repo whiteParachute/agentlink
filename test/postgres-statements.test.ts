@@ -212,3 +212,49 @@ test('control poll and recover statements keep cancel and active recovery scopes
   assert.match(PostgreSqlStatements.recoverDiscard, /SET status = 'EXPIRED'/i);
   assert.match(PostgreSqlStatements.recoverDiscard, /SET status = 'TIMED_OUT'/i);
 });
+
+test('createTaskWithInitialRun inserts retention columns on task and run', () => {
+  const sql = getPostgreSqlStatement('createTaskWithInitialRun');
+  // Task INSERT includes retention columns
+  assert.match(sql, /retention_class/i);
+  assert.match(sql, /memory_space/i);
+  assert.match(sql, /source_system/i);
+  assert.match(sql, /sensitivity/i);
+  // Run SELECT-from-task inherits retention from task, not from params
+  assert.match(sql, /t\.retention_class/i);
+  assert.match(sql, /t\.memory_space/i);
+  assert.match(sql, /t\.source_system/i);
+  assert.match(sql, /t\.sensitivity/i);
+  // Type casts to enums
+  assert.match(sql, /::al_retention_class/i);
+  assert.match(sql, /::al_sensitivity/i);
+});
+
+test('appendAgentletProgress inserts retention columns on event', () => {
+  const sql = getPostgreSqlStatement('appendAgentletProgress');
+  assert.match(sql, /INSERT INTO al_run_event .* retention_class/i);
+  assert.match(sql, /memory_space/i);
+  assert.match(sql, /source_system/i);
+  assert.match(sql, /sensitivity/i);
+  assert.match(sql, /\$6::al_retention_class/i);
+  assert.match(sql, /\$9::al_sensitivity/i);
+});
+
+test('createRetryRunAttempt inherits retention from task, not from old run', () => {
+  const sql = getPostgreSqlStatement('createRetryRunAttempt');
+  // New retry run copies retention from target_task
+  assert.match(sql, /t\.retention_class/i);
+  assert.match(sql, /t\.memory_space/i);
+  assert.match(sql, /t\.source_system/i);
+  assert.match(sql, /t\.sensitivity/i);
+});
+
+test('task find statements include retention through row_to_json envelope', () => {
+  // findTaskById and findRunById use row_to_json(t)/row_to_json(r), which
+  // includes all columns (retention_class, memory_space, source_system, sensitivity).
+  // The columns themselves are verified by the migration tests.
+  assert.match(PostgreSqlStatements.findTaskById, /row_to_json\(t\)/i);
+  assert.match(PostgreSqlStatements.findTaskById, /FROM al_task t/i);
+  assert.match(PostgreSqlStatements.findRunById, /row_to_json\(r\)/i);
+  assert.match(PostgreSqlStatements.findRunById, /FROM al_run r/i);
+});

@@ -389,3 +389,161 @@ test('lease renew extends an executing lease and recovery decisions continue or 
   assert.notEqual(discarded.task.currentRunId, secondCreated.run.id);
   assert.equal(discarded.retryRun?.attemptNo, 2);
 });
+
+test('task has default retention metadata when none is provided', () => {
+  const { created } = bootstrap();
+  assert.equal(created.task.retentionClass, 'operational');
+  assert.equal(created.task.memorySpace, 'default');
+  assert.equal(created.task.sourceSystem, 'agentlink');
+  assert.equal(created.task.sensitivity, 'internal');
+});
+
+test('initial run inherits retention metadata from task', () => {
+  const { created } = bootstrap();
+  assert.equal(created.run.retentionClass, created.task.retentionClass);
+  assert.equal(created.run.memorySpace, created.task.memorySpace);
+  assert.equal(created.run.sourceSystem, created.task.sourceSystem);
+  assert.equal(created.run.sensitivity, created.task.sensitivity);
+});
+
+test('createTask accepts explicit retention metadata', () => {
+  const controlPlane = new InMemoryControlPlane();
+  const created = controlPlane.createTask(
+    {
+      source: 'telegram',
+      sourceRef: 'msg:1',
+      payload: { text: 'hi' },
+      retention: {
+        retentionClass: 'memory_candidate',
+        sensitivity: 'confidential',
+        memorySpace: 'work.demo',
+        sourceSystem: 'telegram',
+      },
+    },
+    'idem-explicit-retention',
+  );
+  assert.equal(created.task.retentionClass, 'memory_candidate');
+  assert.equal(created.task.sensitivity, 'confidential');
+  assert.equal(created.task.memorySpace, 'work.demo');
+  assert.equal(created.task.sourceSystem, 'telegram');
+  assert.equal(created.run.retentionClass, 'memory_candidate');
+});
+
+test('appendProgress events have agentlet-default retention', () => {
+  const { controlPlane, registered, created } = bootstrap();
+  const pulled = controlPlane.pull({ deviceId: registered.device.id, runnerId: registered.runner.id });
+  assert.ok(pulled);
+  controlPlane.ackLease(pulled.leaseId, true);
+  const event = controlPlane.appendProgress({
+    runId: created.run.id,
+    leaseId: pulled.leaseId,
+    seq: 1,
+    eventType: 'STDOUT',
+    payload: { text: 'hello' },
+  });
+  assert.equal(event.retentionClass, 'short_term');
+  assert.equal(event.sourceSystem, 'agentlet');
+  assert.equal(event.memorySpace, 'default');
+  assert.equal(event.sensitivity, 'internal');
+});
+
+test('appendProgress accepts explicit retention override', () => {
+  const { controlPlane, registered, created } = bootstrap();
+  const pulled = controlPlane.pull({ deviceId: registered.device.id, runnerId: registered.runner.id });
+  assert.ok(pulled);
+  controlPlane.ackLease(pulled.leaseId, true);
+  const event = controlPlane.appendProgress({
+    runId: created.run.id,
+    leaseId: pulled.leaseId,
+    seq: 1,
+    eventType: 'artifact',
+    payload: { hash: 'abc' },
+    retention: { retentionClass: 'artifact', sensitivity: 'public' },
+  });
+  assert.equal(event.retentionClass, 'artifact');
+  assert.equal(event.sensitivity, 'public');
+});
+
+test('idempotency replay works when omitting retention vs passing explicit defaults', () => {
+  const controlPlane = new InMemoryControlPlane();
+  const first = controlPlane.createTask(
+    { source: 'telegram', sourceRef: 'msg:1', payload: { text: 'hi' } },
+    'replay-key',
+  );
+  const replay = controlPlane.createTask(
+    {
+      source: 'telegram',
+      sourceRef: 'msg:1',
+      payload: { text: 'hi' },
+      retention: {
+        retentionClass: 'operational',
+        sensitivity: 'internal',
+        memorySpace: 'default',
+        sourceSystem: 'agentlink',
+      },
+    },
+    'replay-key',
+  );
+  assert.equal(replay.created, false);
+  assert.equal(replay.task.id, first.task.id);
+});
+
+test('idempotency conflict when retention differs from normalized defaults', () => {
+  const controlPlane = new InMemoryControlPlane();
+  controlPlane.createTask(
+    { source: 'telegram', sourceRef: 'msg:1', payload: { text: 'hi' } },
+    'conflict-key',
+  );
+  assert.throws(
+    () =>
+      controlPlane.createTask(
+        {
+          source: 'telegram',
+          sourceRef: 'msg:1',
+          payload: { text: 'hi' },
+          retention: { memorySpace: 'other-space' },
+        },
+        'conflict-key',
+      ),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_IDEMPOTENCY_CONFLICT',
+  );
+});
+
+test('idempotency conflict when sensitivity changes', () => {
+  const controlPlane = new InMemoryControlPlane();
+  controlPlane.createTask(
+    { source: 'telegram', sourceRef: 'msg:1', payload: { text: 'hi' } },
+    'sens-key',
+  );
+  assert.throws(
+    () =>
+      controlPlane.createTask(
+        {
+          source: 'telegram',
+          sourceRef: 'msg:1',
+          payload: { text: 'hi' },
+          retention: { sensitivity: 'secret' },
+        },
+        'sens-key',
+      ),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_IDEMPOTENCY_CONFLICT',
+  );
+});
+
+test('raw payload content can coexist with retention metadata (unique raw guard)', () => {
+  const controlPlane = new InMemoryControlPlane();
+  const rawPayload = { text: 'raw message content', user_id: 123 };
+  const created = controlPlane.createTask(
+    { source: 'telegram', sourceRef: 'msg:raw', payload: rawPayload },
+    'raw-guard-key',
+  );
+  // Raw payload is preserved
+  assert.deepEqual(created.task.payload, rawPayload);
+  // But retention metadata is always present
+  assert.ok(created.task.retentionClass);
+  assert.ok(created.task.memorySpace);
+  assert.ok(created.task.sourceSystem);
+  assert.ok(created.task.sensitivity);
+  assert.equal(created.task.retentionClass, 'operational');
+  assert.ok(created.run.retentionClass);
+});

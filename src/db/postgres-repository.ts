@@ -18,6 +18,13 @@ import type {
   WorkdirGrantRecord,
 } from '../domain/entities.js';
 import { evaluateDispatchPolicy } from '../domain/policy.js';
+import {
+  EVENT_RETENTION_DEFAULTS,
+  TASK_RETENTION_DEFAULTS,
+  normalizeRetentionMetadata,
+  type RetentionMetadataInput,
+  withoutRawRetention,
+} from '../domain/retention.js';
 import { decideRetry } from '../domain/retry.js';
 import { hashStable, stableStringify } from '../domain/signature.js';
 import type { RunStatus } from '../domain/status.js';
@@ -227,7 +234,8 @@ export class PostgreSqlRepository {
   async createTaskWithInitialRun(input: CreateTaskInput, idempotencyKey: string): Promise<CreateTaskRepositoryResult> {
     if (!idempotencyKey) throw new AgentlinkError(400, 'AL_IDEMPOTENCY_REQUIRED', 'Idempotency-Key is required');
     const domain = input.domain ?? 'personal';
-    const signature = createTaskIdempotencySignature(domain, input);
+    const retention = normalizeRetentionMetadata(input.retention, TASK_RETENTION_DEFAULTS);
+    const signature = createTaskIdempotencySignature(domain, input, retention);
 
     try {
       return await withTransaction(this.client, async (tx) => {
@@ -252,6 +260,10 @@ export class PostgreSqlRepository {
           input.maxRetries ?? 1,
           idempotencyKey,
           signature,
+          retention.retentionClass,
+          retention.memorySpace,
+          retention.sourceSystem,
+          retention.sensitivity,
           now,
           randomUUID(),
           toJsonbParam(instruction),
@@ -503,17 +515,22 @@ export class PostgreSqlRepository {
     return { lease: mapLease(row.lease), run: mapRun(row.run), task: mapTask(row.task) };
   }
 
-  async appendAgentletProgress(input: { runId: string; leaseId: string; seq: number; eventType: string; payload?: JsonRecord }): Promise<RunEventRecord> {
+  async appendAgentletProgress(input: { runId: string; leaseId: string; seq: number; eventType: string; payload?: JsonRecord; retention?: RetentionMetadataInput }): Promise<RunEventRecord> {
     if (!Number.isInteger(input.seq) || input.seq <= 0) {
       throw new AgentlinkError(400, 'AL_EVENT_SEQ_INVALID', 'Progress seq must be a positive integer');
     }
     const payload = input.payload ?? {};
+    const retention = normalizeRetentionMetadata(input.retention, EVENT_RETENTION_DEFAULTS);
     const inserted = await this.client.query<RunEventRow>(PostgreSqlStatements.appendAgentletProgress, [
       input.runId,
       input.leaseId,
       input.seq,
       input.eventType,
       toJsonbParam(payload),
+      retention.retentionClass,
+      retention.memorySpace,
+      retention.sourceSystem,
+      retention.sensitivity,
       this.timestamp(),
     ]);
     if (inserted.rowCount > 0) return mapRunEvent(requireSingleRow(inserted, 'AL_INTERNAL', 'Progress insert returned rowCount without a row'));
@@ -716,8 +733,8 @@ export class PostgreSqlRepository {
   }
 }
 
-export function createTaskIdempotencySignature(domain: Domain, input: CreateTaskInput): string {
-  return stableStringify({ domain, input });
+export function createTaskIdempotencySignature(domain: Domain, input: CreateTaskInput, retention: RetentionMetadataInput | undefined): string {
+  return stableStringify({ domain, input: withoutRawRetention(input), retention });
 }
 
 interface EnvelopeRow {
@@ -772,6 +789,10 @@ function mapTask(value: unknown): TaskRecord {
     maxRetries: readNumber(row, 'max_retries'),
     idempotencyKey: readString(row, 'idempotency_key'),
     idempotencySignature: readString(row, 'idempotency_signature'),
+    retentionClass: readRetentionClass(row, 'retention_class'),
+    memorySpace: readString(row, 'memory_space'),
+    sourceSystem: readString(row, 'source_system'),
+    sensitivity: readSensitivity(row, 'sensitivity'),
     createdAt: readTimestamp(row, 'created_at'),
     updatedAt: readTimestamp(row, 'updated_at'),
   };
@@ -787,6 +808,10 @@ function mapRun(value: unknown): RunRecord {
     attemptNo: readNumber(row, 'attempt_no'),
     instruction: readJsonRecord(row, 'instruction'),
     metrics: readJsonRecord(row, 'metrics'),
+    retentionClass: readRetentionClass(row, 'retention_class'),
+    memorySpace: readString(row, 'memory_space'),
+    sourceSystem: readString(row, 'source_system'),
+    sensitivity: readSensitivity(row, 'sensitivity'),
     version: readNumber(row, 'version'),
     createdAt: readTimestamp(row, 'created_at'),
     updatedAt: readTimestamp(row, 'updated_at'),
@@ -834,6 +859,10 @@ function mapRunEvent(value: unknown): RunEventRecord {
     domain: readDomain(row, 'domain'),
     eventType: readString(row, 'event_type'),
     payload: readJsonRecord(row, 'payload'),
+    retentionClass: readRetentionClass(row, 'retention_class'),
+    memorySpace: readString(row, 'memory_space'),
+    sourceSystem: readString(row, 'source_system'),
+    sensitivity: readSensitivity(row, 'sensitivity'),
     emittedAt: readTimestamp(row, 'emitted_at'),
   };
 }
@@ -974,6 +1003,29 @@ function readTimestamp(row: Record<string, unknown>, key: string): string {
 function readDomain(row: Record<string, unknown>, key: string): Domain {
   const value = readString(row, key);
   if (value !== 'personal' && value !== 'work') throw new AgentlinkError(500, 'AL_REPOSITORY_MAPPING', `${key} must be a domain`);
+  return value;
+}
+
+function readRetentionClass(row: Record<string, unknown>, key: string): TaskRecord['retentionClass'] {
+  const value = readString(row, key);
+  if (
+    value !== 'short_term' &&
+    value !== 'operational' &&
+    value !== 'artifact' &&
+    value !== 'audit' &&
+    value !== 'memory_candidate' &&
+    value !== 'memory'
+  ) {
+    throw new AgentlinkError(500, 'AL_REPOSITORY_MAPPING', `${key} must be a retention class`);
+  }
+  return value;
+}
+
+function readSensitivity(row: Record<string, unknown>, key: string): TaskRecord['sensitivity'] {
+  const value = readString(row, key);
+  if (value !== 'public' && value !== 'internal' && value !== 'confidential' && value !== 'secret') {
+    throw new AgentlinkError(500, 'AL_REPOSITORY_MAPPING', `${key} must be a sensitivity`);
+  }
   return value;
 }
 

@@ -17,6 +17,14 @@ import type {
   WorkdirGrantRecord,
 } from '../domain/entities.js';
 import { evaluateDispatchPolicy } from '../domain/policy.js';
+import {
+  EVENT_RETENTION_DEFAULTS,
+  TASK_RETENTION_DEFAULTS,
+  normalizeRetentionMetadata,
+  withoutRawRetention,
+  type RetentionMetadata,
+  type RetentionMetadataInput,
+} from '../domain/retention.js';
 import { decideRetry } from '../domain/retry.js';
 import { hashStable, stableStringify } from '../domain/signature.js';
 import type { LeaseStatus, RunStatus } from '../domain/status.js';
@@ -36,6 +44,7 @@ export interface CreateTaskInput {
   payload?: JsonRecord;
   taskSpec?: JsonRecord;
   maxRetries?: number;
+  retention?: RetentionMetadataInput;
 }
 
 export interface RegisterDeviceInput {
@@ -117,8 +126,9 @@ export class InMemoryControlPlane {
     if (!idempotencyKey) {
       throw new AgentlinkError(400, 'AL_IDEMPOTENCY_REQUIRED', 'Idempotency-Key is required');
     }
+    const retention = normalizeRetentionMetadata(input.retention, TASK_RETENTION_DEFAULTS);
     const domain = input.domain ?? 'personal';
-    const signature = stableStringify({ domain, input });
+    const signature = stableStringify({ domain, input: withoutRawRetention(input), retention });
     const idempotencyMapKey = `${domain}:${idempotencyKey}`;
     const existing = this.taskIdempotency.get(idempotencyMapKey);
     if (existing) {
@@ -146,6 +156,10 @@ export class InMemoryControlPlane {
       maxRetries: input.maxRetries ?? 1,
       idempotencyKey,
       idempotencySignature: signature,
+      retentionClass: retention.retentionClass,
+      memorySpace: retention.memorySpace,
+      sourceSystem: retention.sourceSystem,
+      sensitivity: retention.sensitivity,
       createdAt: now,
       updatedAt: now,
     };
@@ -157,6 +171,10 @@ export class InMemoryControlPlane {
       attemptNo: 1,
       instruction,
       metrics: {},
+      retentionClass: retention.retentionClass,
+      memorySpace: retention.memorySpace,
+      sourceSystem: retention.sourceSystem,
+      sensitivity: retention.sensitivity,
       version: 1,
       createdAt: now,
       updatedAt: now,
@@ -572,7 +590,7 @@ export class InMemoryControlPlane {
     return { ...renewed, controlActions: this.pollControl(lease.deviceId).controlActions };
   }
 
-  appendProgress(input: { runId: string; leaseId: string; seq: number; eventType: string; payload?: JsonRecord }): RunEventRecord {
+  appendProgress(input: { runId: string; leaseId: string; seq: number; eventType: string; payload?: JsonRecord; retention?: RetentionMetadataInput }): RunEventRecord {
     const run = this.mustGetRun(input.runId);
     this.mustHaveExecutingLease(run, input.leaseId);
     if (!Number.isInteger(input.seq) || input.seq <= 0) {
@@ -588,12 +606,19 @@ export class InMemoryControlPlane {
       return existing;
     }
 
+    const retention = normalizeRetentionMetadata(input.retention, {
+      ...EVENT_RETENTION_DEFAULTS,
+    });
     const event: RunEventRecord = {
       runId: run.id,
       seq: input.seq,
       domain: run.domain,
       eventType: input.eventType,
       payload,
+      retentionClass: retention.retentionClass,
+      memorySpace: retention.memorySpace,
+      sourceSystem: retention.sourceSystem,
+      sensitivity: retention.sensitivity,
       emittedAt: this.timestamp(),
     };
     perRunEvents.set(event.seq, event);
@@ -780,6 +805,10 @@ export class InMemoryControlPlane {
       instruction: previousRun.instruction,
       retryOfRunId: previousRun.id,
       metrics: {},
+      retentionClass: task.retentionClass,
+      memorySpace: task.memorySpace,
+      sourceSystem: task.sourceSystem,
+      sensitivity: task.sensitivity,
       version: 1,
       createdAt: now,
       updatedAt: now,

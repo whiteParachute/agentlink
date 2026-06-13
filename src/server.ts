@@ -6,6 +6,7 @@ import { PostgresControlPlane } from './control-plane/postgres.js';
 import type { AgentlinkControlPlanePort } from './control-plane/port.js';
 import { PgRuntime } from './db/pg-client.js';
 import type { CapabilityGrantRecord, DeviceRecord, JsonRecord, RunRecord, RunnerRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
+import { RetentionMetadataError, type RetentionMetadataInput } from './domain/retention.js';
 import type { RunStatus } from './domain/status.js';
 import { sendJson } from './http/json.js';
 
@@ -26,6 +27,10 @@ export function createAgentlinkServer(info: ServerInfo, options: AgentlinkServer
     void handleRequest(req, res, info, controlPlane).catch((error: unknown) => {
       if (isAgentlinkError(error)) {
         sendJson(res, error.statusCode, { ok: false, error: { code: error.code, message: error.message, details: error.details } });
+        return;
+      }
+      if (error instanceof RetentionMetadataError) {
+        sendJson(res, 400, { ok: false, error: { code: 'AL_BAD_REQUEST', message: error.message, field: error.field } });
         return;
       }
       sendJson(res, 500, { ok: false, error: { code: 'AL_INTERNAL', message: error instanceof Error ? error.message : 'internal error' } });
@@ -97,12 +102,14 @@ async function handleRequest(
     const body = await readJsonRecord(req);
     const taskSpec = optionalRecord(body, 'task_spec');
     const maxRetries = optionalInteger(body, 'max_retries');
+    const retention = optionalRetention(body, 'retention');
     const input: CreateTaskInput = {
       source: requireString(body, 'source'),
       sourceRef: requireString(body, 'source_ref'),
       payload: optionalRecord(body, 'payload') ?? {},
       ...(taskSpec ? { taskSpec } : {}),
       ...(maxRetries !== undefined ? { maxRetries } : {}),
+      ...(retention ? { retention } : {}),
     };
     const idempotencyKey = getIdempotencyKey(req, body);
     const result = await controlPlane.createTask(input, idempotencyKey);
@@ -352,12 +359,14 @@ async function handleRequest(
     const deviceId = requireString(body, 'device_id');
     await controlPlane.authenticateDevice(deviceId, requireBearer(req));
     await ensureLeaseBelongsToDevice(controlPlane, requireString(body, 'lease_id'), deviceId);
+    const retention = optionalRetention(body, 'retention');
     const event = await controlPlane.appendProgress({
       runId: requireString(body, 'run_id'),
       leaseId: requireString(body, 'lease_id'),
       seq: requireInteger(body, 'seq'),
       eventType: requireString(body, 'event_type'),
       payload: optionalRecord(body, 'payload') ?? {},
+      ...(retention ? { retention } : {}),
     });
     sendJson(res, 200, { event: toRunEventDto(event) });
     return;
@@ -413,6 +422,12 @@ function toTaskDto(task: TaskRecord) {
     current_run_id: task.currentRunId,
     retry_count: task.retryCount,
     max_retries: task.maxRetries,
+    retention: {
+      retention_class: task.retentionClass,
+      memory_space: task.memorySpace,
+      source_system: task.sourceSystem,
+      sensitivity: task.sensitivity,
+    },
     created_at: task.createdAt,
     updated_at: task.updatedAt,
   };
@@ -431,6 +446,12 @@ function toRunDto(run: RunRecord) {
     result: run.result,
     error: run.error,
     metrics: run.metrics,
+    retention: {
+      retention_class: run.retentionClass,
+      memory_space: run.memorySpace,
+      source_system: run.sourceSystem,
+      sensitivity: run.sensitivity,
+    },
     version: run.version,
     created_at: run.createdAt,
     updated_at: run.updatedAt,
@@ -461,13 +482,19 @@ function toLeaseDto(lease: { id: string; runId: string; domain: string; deviceId
   };
 }
 
-function toRunEventDto(event: { runId: string; seq: number; domain: string; eventType: string; payload: JsonRecord; emittedAt: string }) {
+function toRunEventDto(event: { runId: string; seq: number; domain: string; eventType: string; payload: JsonRecord; retentionClass: string; memorySpace: string; sourceSystem: string; sensitivity: string; emittedAt: string }) {
   return {
     run_id: event.runId,
     seq: event.seq,
     domain: event.domain,
     event_type: event.eventType,
     payload: event.payload,
+    retention: {
+      retention_class: event.retentionClass,
+      memory_space: event.memorySpace,
+      source_system: event.sourceSystem,
+      sensitivity: event.sensitivity,
+    },
     emitted_at: event.emittedAt,
   };
 }
@@ -671,6 +698,18 @@ function optionalWorkdirGrants(body: JsonRecord, key: string): RegisterDeviceInp
     }
     return { pathPrefix, accessMode };
   });
+}
+
+function optionalRetention(body: JsonRecord, key: string): RetentionMetadataInput | undefined {
+  const value = body[key];
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw new AgentlinkError(400, 'AL_BAD_REQUEST', `${key} must be an object`);
+  const result: RetentionMetadataInput = {};
+  if (value.retention_class !== undefined) result.retentionClass = String(value.retention_class);
+  if (value.memory_space !== undefined) result.memorySpace = String(value.memory_space);
+  if (value.source_system !== undefined) result.sourceSystem = String(value.source_system);
+  if (value.sensitivity !== undefined) result.sensitivity = String(value.sensitivity);
+  return result;
 }
 
 function isRecord(value: unknown): value is JsonRecord {

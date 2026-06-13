@@ -10,6 +10,12 @@ CREATE TYPE al_lease_status AS ENUM ('ISSUED', 'ACKED', 'RENEWED', 'COMPLETED', 
 CREATE TYPE al_device_status AS ENUM ('REGISTERED', 'ONLINE', 'OFFLINE', 'SUSPENDED', 'REVOKED');
 CREATE TYPE al_grant_status AS ENUM ('GRANTED', 'REVOKED');
 
+-- AL-M1-002 retention metadata vocabulary. retention_class records why an object
+-- is kept; sensitivity records how protected it is. memory_space / source_system
+-- are CHECK-constrained text identifiers (see al_retention_identifier checks).
+CREATE TYPE al_retention_class AS ENUM ('short_term', 'operational', 'artifact', 'audit', 'memory_candidate', 'memory');
+CREATE TYPE al_sensitivity AS ENUM ('public', 'internal', 'confidential', 'secret');
+
 CREATE TABLE al_task (
   id uuid PRIMARY KEY,
   domain al_domain NOT NULL DEFAULT 'personal',
@@ -23,6 +29,10 @@ CREATE TABLE al_task (
   max_retries integer NOT NULL DEFAULT 1 CHECK (max_retries >= 0),
   idempotency_key text NOT NULL,
   idempotency_signature text NOT NULL,
+  retention_class al_retention_class NOT NULL DEFAULT 'operational',
+  memory_space text NOT NULL DEFAULT 'default' CHECK (memory_space ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  source_system text NOT NULL DEFAULT 'agentlink' CHECK (source_system ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  sensitivity al_sensitivity NOT NULL DEFAULT 'internal',
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (domain, idempotency_key)
@@ -84,6 +94,10 @@ CREATE TABLE al_run (
   result jsonb,
   error jsonb,
   metrics jsonb NOT NULL DEFAULT '{}'::jsonb,
+  retention_class al_retention_class NOT NULL DEFAULT 'operational',
+  memory_space text NOT NULL DEFAULT 'default' CHECK (memory_space ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  source_system text NOT NULL DEFAULT 'agentlink' CHECK (source_system ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  sensitivity al_sensitivity NOT NULL DEFAULT 'internal',
   current_lease_id uuid,
   version integer NOT NULL DEFAULT 1 CHECK (version > 0),
   created_at timestamptz NOT NULL DEFAULT now(),
@@ -169,6 +183,10 @@ CREATE TABLE al_run_event (
   domain al_domain NOT NULL DEFAULT 'personal',
   event_type text NOT NULL,
   payload jsonb NOT NULL DEFAULT '{}'::jsonb,
+  retention_class al_retention_class NOT NULL DEFAULT 'short_term',
+  memory_space text NOT NULL DEFAULT 'default' CHECK (memory_space ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  source_system text NOT NULL DEFAULT 'agentlet' CHECK (source_system ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  sensitivity al_sensitivity NOT NULL DEFAULT 'internal',
   emitted_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (run_id, seq)
 );
@@ -195,6 +213,10 @@ CREATE TABLE al_artifact (
   size bigint NOT NULL CHECK (size >= 0),
   storage_type text NOT NULL CHECK (storage_type IN ('inline', 'ref')),
   uri text,
+  retention_class al_retention_class NOT NULL DEFAULT 'artifact',
+  memory_space text NOT NULL DEFAULT 'default' CHECK (memory_space ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  source_system text NOT NULL DEFAULT 'agentlink' CHECK (source_system ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  sensitivity al_sensitivity NOT NULL DEFAULT 'internal',
   created_at timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (domain, hash)
 );
@@ -208,6 +230,10 @@ CREATE TABLE al_audit_log (
   target_id text NOT NULL,
   result text NOT NULL,
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb,
+  retention_class al_retention_class NOT NULL DEFAULT 'audit',
+  memory_space text NOT NULL DEFAULT 'default' CHECK (memory_space ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  source_system text NOT NULL DEFAULT 'agentlink' CHECK (source_system ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  sensitivity al_sensitivity NOT NULL DEFAULT 'internal',
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -229,5 +255,13 @@ WHERE revoked_at IS NULL;
 CREATE INDEX idx_al_policy_decision_run ON al_policy_decision(run_id);
 CREATE INDEX idx_al_control_action_device_status_created ON al_control_action(device_id, status, created_at);
 CREATE INDEX idx_al_audit_log_domain_created ON al_audit_log(domain, created_at DESC);
+
+-- AL-M1-002 retention lookup indexes: support querying long-lived objects by
+-- their retention boundary (memory_space + retention_class) per domain.
+CREATE INDEX idx_al_task_retention ON al_task(domain, memory_space, retention_class);
+CREATE INDEX idx_al_run_retention ON al_run(domain, memory_space, retention_class);
+CREATE INDEX idx_al_run_event_retention ON al_run_event(domain, memory_space, retention_class);
+CREATE INDEX idx_al_artifact_retention ON al_artifact(domain, memory_space, retention_class);
+CREATE INDEX idx_al_audit_log_retention ON al_audit_log(domain, memory_space, retention_class);
 
 COMMIT;
