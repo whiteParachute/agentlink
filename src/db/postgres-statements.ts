@@ -1410,6 +1410,79 @@ SELECT row_to_json(mc) AS memory_candidate
 FROM updated mc;
 `,
 
+  findMemoryById: `
+SELECT row_to_json(m) AS memory
+FROM al_memory m
+WHERE m.id = $1;
+`,
+
+  findMemoryByCandidateId: `
+SELECT row_to_json(m) AS memory
+FROM al_memory m
+WHERE m.memory_candidate_id = $1;
+`,
+
+  findMemoryByNaturalKey: `
+SELECT row_to_json(m) AS memory
+FROM al_memory m
+WHERE m.session_id = $1
+  AND m.natural_key = $2;
+`,
+
+  listMemoriesBySession: `
+SELECT row_to_json(m) AS memory
+FROM al_memory m
+WHERE m.session_id = $1
+ORDER BY m.created_at ASC, m.id ASC;
+`,
+
+  insertMemory: `
+WITH inserted AS (
+  INSERT INTO al_memory (
+    id,
+    session_id,
+    memory_candidate_id,
+    entry_id,
+    source_event_id,
+    memory_text,
+    natural_key,
+    reason,
+    confidence,
+    bridge_status,
+    metadata,
+    retention_class,
+    memory_space,
+    source_system,
+    sensitivity,
+    promoted_at,
+    created_at,
+    updated_at
+  ) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $9,
+    'local',
+    $10::jsonb,
+    $11::al_retention_class,
+    $12,
+    $13,
+    $14::al_sensitivity,
+    $15,
+    $15,
+    $15
+  )
+  RETURNING *
+)
+SELECT row_to_json(m) AS memory
+FROM inserted m;
+`,
+
   insertSourceEvent: `
 WITH inserted AS (
   INSERT INTO al_source_event (

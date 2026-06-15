@@ -392,6 +392,28 @@ CREATE TABLE al_memory_candidate (
   UNIQUE (session_id, natural_key)
 );
 
+CREATE TABLE al_memory (
+  id uuid PRIMARY KEY,
+  session_id uuid NOT NULL REFERENCES al_session(id) ON DELETE CASCADE,
+  memory_candidate_id uuid REFERENCES al_memory_candidate(id) ON DELETE SET NULL UNIQUE,
+  entry_id uuid REFERENCES al_entry(id) ON DELETE SET NULL,
+  source_event_id uuid REFERENCES al_source_event(id) ON DELETE SET NULL,
+  memory_text text NOT NULL CHECK (length(btrim(memory_text)) BETWEEN 1 AND 8192),
+  natural_key text NOT NULL CHECK (length(btrim(natural_key)) BETWEEN 1 AND 1024),
+  reason text NOT NULL DEFAULT '',
+  confidence numeric(4,3) CHECK (confidence IS NULL OR (confidence >= 0 AND confidence <= 1)),
+  bridge_status text NOT NULL DEFAULT 'local' CHECK (bridge_status = 'local'),
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
+  retention_class al_retention_class NOT NULL DEFAULT 'memory',
+  memory_space text NOT NULL DEFAULT 'default' CHECK (memory_space ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  source_system text NOT NULL DEFAULT 'agentlink' CHECK (source_system ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  sensitivity al_sensitivity NOT NULL DEFAULT 'internal',
+  promoted_at timestamptz NOT NULL DEFAULT now(),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (session_id, natural_key)
+);
+
 CREATE INDEX idx_al_task_domain_status_created ON al_task(domain, status, created_at DESC);
 CREATE UNIQUE INDEX uq_al_run_task_attempt ON al_run(task_id, attempt_no);
 CREATE INDEX idx_al_run_task ON al_run(task_id);
@@ -428,6 +450,9 @@ CREATE INDEX idx_al_entry_retention ON al_entry(memory_space, retention_class);
 CREATE INDEX idx_al_memory_candidate_session ON al_memory_candidate(session_id);
 CREATE INDEX idx_al_memory_candidate_status ON al_memory_candidate(status);
 CREATE INDEX idx_al_memory_candidate_retention ON al_memory_candidate(memory_space, retention_class);
+CREATE INDEX idx_al_memory_session ON al_memory(session_id);
+CREATE INDEX idx_al_memory_candidate ON al_memory(memory_candidate_id);
+CREATE INDEX idx_al_memory_retention ON al_memory(memory_space, retention_class);
 
 -- AL-M1-002 retention lookup indexes: support querying long-lived objects by
 -- their retention boundary (memory_space + retention_class) per domain.

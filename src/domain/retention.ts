@@ -179,6 +179,13 @@ export const MEMORY_CANDIDATE_RETENTION_DEFAULTS: RetentionDefaults = {
   sourceSystem: DEFAULT_SOURCE_SYSTEM,
 };
 
+export const MEMORY_RETENTION_DEFAULTS: RetentionDefaults = {
+  retentionClass: 'memory',
+  sensitivity: 'internal',
+  memorySpace: DEFAULT_MEMORY_SPACE,
+  sourceSystem: DEFAULT_SOURCE_SYSTEM,
+};
+
 export const SOURCE_EVENT_RETENTION_DEFAULTS: RetentionDefaults = {
   retentionClass: 'short_term',
   sensitivity: 'internal',

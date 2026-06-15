@@ -1577,3 +1577,124 @@ test('PostgreSqlRepository updates memory candidate status and recovers unique r
     PostgreSqlStatements.findMemoryCandidateByNaturalKey,
   ]);
 });
+
+function memoryRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: '00000000-0000-4000-8000-000000001401',
+    session_id: '00000000-0000-4000-8000-000000001201',
+    memory_candidate_id: '00000000-0000-4000-8000-000000001301',
+    entry_id: '00000000-0000-4000-8000-000000001101',
+    source_event_id: '00000000-0000-4000-8000-000000001001',
+    memory_text: '用户喜欢简洁回复',
+    natural_key: 'candidate:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    reason: 'reviewed',
+    confidence: '0.750',
+    bridge_status: 'local',
+    metadata: {},
+    retention_class: 'memory',
+    memory_space: 'default',
+    source_system: 'agentlink',
+    sensitivity: 'internal',
+    promoted_at: NOW,
+    created_at: NOW,
+    updated_at: NOW,
+    ...overrides,
+  };
+}
+
+test('PostgreSqlRepository promotes memory candidate into append-only memory', async () => {
+  const client = new ScriptedSqlClient();
+  const candidate = memoryCandidateRow({ status: 'pending', reason: 'manual' });
+  client.enqueue(one({ memory_candidate: candidate }));
+  client.enqueue(none());
+  client.enqueue(one({ session: sessionRow() }));
+  client.enqueue(none());
+  client.enqueue(one({ memory_candidate: memoryCandidateRow({ status: 'accepted', reason: 'reviewed' }) }));
+  client.enqueue(one({ memory: memoryRow({ reason: 'reviewed' }) }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const result = await repo.promoteMemoryCandidate({ memoryCandidateId: candidate.id as string, reason: ' reviewed ' });
+  assert.equal(result.created, true);
+  assert.equal(result.memory.memoryCandidateId, candidate.id);
+  assert.equal(result.memory.retentionClass, 'memory');
+  assert.equal(result.memory.bridgeStatus, 'local');
+  assert.equal(result.memoryCandidate.status, 'accepted');
+  assert.deepEqual(client.calls.map((call) => call.sql), [
+    'BEGIN',
+    PostgreSqlStatements.findMemoryCandidateById,
+    PostgreSqlStatements.findMemoryByCandidateId,
+    PostgreSqlStatements.findSessionById,
+    PostgreSqlStatements.findMemoryByNaturalKey,
+    PostgreSqlStatements.updateMemoryCandidateStatus,
+    PostgreSqlStatements.insertMemory,
+    'COMMIT',
+  ]);
+  assert.equal(client.calls[6]?.params?.[5], '用户喜欢简洁回复');
+  assert.equal(client.calls[6]?.params?.[6], candidate.natural_key);
+  assert.equal(client.calls[6]?.params?.[10], 'memory');
+});
+
+test('PostgreSqlRepository replays and lists promoted memories', async () => {
+  const existing = memoryRow({ confidence: null });
+  const replayClient = new ScriptedSqlClient();
+  replayClient.enqueue(one({ memory_candidate: memoryCandidateRow({ status: 'accepted' }) }));
+  replayClient.enqueue(one({ memory: existing }));
+  const replayRepo = new PostgreSqlRepository(replayClient, { now: () => new Date(NOW) });
+  const replay = await replayRepo.promoteMemoryCandidate({ memoryCandidateId: existing.memory_candidate_id as string });
+  assert.equal(replay.created, false);
+  assert.equal(replay.memory.id, existing.id);
+  assert.equal(replay.memory.confidence, undefined);
+
+  const listClient = new ScriptedSqlClient();
+  listClient.enqueue(one({ session: sessionRow() }));
+  listClient.enqueue({ rows: [{ memory: existing }], rowCount: 1 });
+  const listRepo = new PostgreSqlRepository(listClient, { now: () => new Date(NOW) });
+  const list = await listRepo.listMemories(existing.session_id as string);
+  assert.deepEqual(list.map((memory) => memory.id), [existing.id]);
+  assert.deepEqual(listClient.calls.map((call) => call.sql), [PostgreSqlStatements.findSessionById, PostgreSqlStatements.listMemoriesBySession]);
+});
+
+test('PostgreSqlRepository rejects rejected candidate and recovers memory unique race by re-reading', async () => {
+  const rejectedClient = new ScriptedSqlClient();
+  rejectedClient.enqueue(one({ memory_candidate: memoryCandidateRow({ status: 'rejected' }) }));
+  rejectedClient.enqueue(none());
+  const rejectedRepo = new PostgreSqlRepository(rejectedClient, { now: () => new Date(NOW) });
+  await assert.rejects(
+    () => rejectedRepo.promoteMemoryCandidate({ memoryCandidateId: '00000000-0000-4000-8000-000000001301' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_BAD_REQUEST',
+  );
+  assert.deepEqual(rejectedClient.calls.map((call) => call.sql), [
+    'BEGIN',
+    PostgreSqlStatements.findMemoryCandidateById,
+    PostgreSqlStatements.findMemoryByCandidateId,
+    'ROLLBACK',
+  ]);
+
+  const raceClient = new ScriptedSqlClient();
+  const unique = Object.assign(new Error('duplicate'), { code: '23505' });
+  raceClient.enqueue(one({ memory_candidate: memoryCandidateRow({ status: 'pending' }) }));
+  raceClient.enqueue(none());
+  raceClient.enqueue(one({ session: sessionRow() }));
+  raceClient.enqueue(none());
+  raceClient.enqueue(one({ memory_candidate: memoryCandidateRow({ status: 'accepted' }) }));
+  raceClient.enqueue(unique);
+  raceClient.enqueue(one({ memory_candidate: memoryCandidateRow({ status: 'accepted' }) }));
+  raceClient.enqueue(one({ memory: memoryRow() }));
+  const raceRepo = new PostgreSqlRepository(raceClient, { now: () => new Date(NOW) });
+  const race = await raceRepo.promoteMemoryCandidate({ memoryCandidateId: '00000000-0000-4000-8000-000000001301' });
+  assert.equal(race.created, false);
+  assert.deepEqual(raceClient.calls.map((call) => call.sql), [
+    'BEGIN',
+    PostgreSqlStatements.findMemoryCandidateById,
+    PostgreSqlStatements.findMemoryByCandidateId,
+    PostgreSqlStatements.findSessionById,
+    PostgreSqlStatements.findMemoryByNaturalKey,
+    PostgreSqlStatements.updateMemoryCandidateStatus,
+    PostgreSqlStatements.insertMemory,
+    'ROLLBACK',
+    'BEGIN',
+    PostgreSqlStatements.findMemoryCandidateById,
+    PostgreSqlStatements.findMemoryByCandidateId,
+    'COMMIT',
+  ]);
+});

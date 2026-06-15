@@ -67,6 +67,7 @@ test('health, ready, and meta endpoints return service metadata', async () => {
     assert.equal(body.capabilities.includes('reply-mode-api'), true);
     assert.equal(body.capabilities.includes('session-api'), true);
     assert.equal(body.capabilities.includes('memory-candidate-api'), true);
+    assert.equal(body.capabilities.includes('memory-api'), true);
   });
 });
 
@@ -1958,5 +1959,92 @@ test('HTTP memory candidate endpoint validates references, status, and route ord
     const listBody = (await listRoute.json()) as { memory_candidates?: unknown[]; session?: unknown };
     assert.ok(Array.isArray(listBody.memory_candidates));
     assert.equal(listBody.session, undefined);
+  }, { ingressBearerToken: 'test-ingress' });
+});
+
+test('HTTP memory promote endpoint requires bearer and explicitly creates finalized memory', async () => {
+  await withServer(async (baseUrl) => {
+    const auth = { authorization: 'Bearer test-ingress' };
+    const noToken = await postJson(baseUrl, '/api/v1/memory-candidates/missing/promote', {});
+    assert.equal(noToken.status, 401);
+    const wrongToken = await postJson(baseUrl, '/api/v1/memory-candidates/missing/promote', {}, { authorization: 'Bearer wrong' });
+    assert.equal(wrongToken.status, 403);
+
+    const fake = await postJson(baseUrl, '/api/v1/fake-im/events', { kind: 'dm', message_id: 'memory-msg-1', text: '用户喜欢简洁回复' }, auth);
+    const fakeBody = (await fake.json()) as { source_event: { id: string }; entry: { id: string } };
+    const resolved = await postJson(baseUrl, '/api/v1/sessions/resolve', { entry_id: fakeBody.entry.id }, auth);
+    const resolvedBody = (await resolved.json()) as { session: { id: string } };
+    const candidate = await postJson(
+      baseUrl,
+      '/api/v1/memory-candidates',
+      { session_id: resolvedBody.session.id, entry_id: fakeBody.entry.id, source_event_id: fakeBody.source_event.id, candidate_text: ' 用户喜欢简洁回复 ', confidence: 0.75 },
+      auth,
+    );
+    const candidateBody = (await candidate.json()) as { memory_candidate: Record<string, unknown> };
+
+    const acceptedOnly = await patchJson(baseUrl, `/api/v1/memory-candidates/${candidateBody.memory_candidate.id}/status`, { status: 'accepted', reason: 'reviewed' }, auth);
+    assert.equal(acceptedOnly.status, 200);
+    const beforePromote = await fetch(`${baseUrl}/api/v1/sessions/${resolvedBody.session.id}/memories`, { headers: auth });
+    assert.equal(beforePromote.status, 200);
+    assert.deepEqual(((await beforePromote.json()) as { memories: unknown[] }).memories, []);
+
+    const promoted = await postJson(baseUrl, `/api/v1/memory-candidates/${candidateBody.memory_candidate.id}/promote`, { reason: '用户确认' }, auth);
+    assert.equal(promoted.status, 201);
+    const promotedBody = (await promoted.json()) as { created: boolean; memory: Record<string, unknown>; memory_candidate: Record<string, unknown> };
+    assert.equal(promotedBody.created, true);
+    assert.equal(promotedBody.memory.memory_candidate_id, candidateBody.memory_candidate.id);
+    assert.equal(promotedBody.memory.session_id, resolvedBody.session.id);
+    assert.equal(promotedBody.memory.entry_id, fakeBody.entry.id);
+    assert.equal(promotedBody.memory.source_event_id, fakeBody.source_event.id);
+    assert.equal(promotedBody.memory.memory_text, '用户喜欢简洁回复');
+    assert.equal(promotedBody.memory.natural_key, candidateBody.memory_candidate.natural_key);
+    assert.equal(promotedBody.memory.reason, '用户确认');
+    assert.equal(promotedBody.memory.confidence, 0.75);
+    assert.equal(promotedBody.memory.bridge_status, 'local');
+    assert.equal((promotedBody.memory.retention as Record<string, string>).retention_class, 'memory');
+    assert.equal(promotedBody.memory_candidate.status, 'accepted');
+
+    const replay = await postJson(baseUrl, `/api/v1/memory-candidates/${candidateBody.memory_candidate.id}/promote`, {}, auth);
+    assert.equal(replay.status, 200);
+    const replayBody = (await replay.json()) as { created: boolean; memory: Record<string, unknown> };
+    assert.equal(replayBody.created, false);
+    assert.equal(replayBody.memory.id, promotedBody.memory.id);
+
+    const get = await fetch(`${baseUrl}/api/v1/memories/${promotedBody.memory.id}`, { headers: auth });
+    assert.equal(get.status, 200);
+    assert.equal(((await get.json()) as { memory: Record<string, unknown> }).memory.id, promotedBody.memory.id);
+
+    const list = await fetch(`${baseUrl}/api/v1/sessions/${resolvedBody.session.id}/memories`, { headers: auth });
+    assert.equal(list.status, 200);
+    const listBody = (await list.json()) as { memories: Array<Record<string, unknown>>; session?: unknown };
+    assert.deepEqual(listBody.memories.map((memory) => memory.id), [promotedBody.memory.id]);
+    assert.equal(listBody.session, undefined);
+
+    const directCreate = await postJson(baseUrl, '/api/v1/memories', { memory_text: 'not allowed' }, auth);
+    assert.equal(directCreate.status, 404);
+  }, { ingressBearerToken: 'test-ingress' });
+});
+
+test('HTTP memory promote endpoint validates missing and rejected candidates', async () => {
+  await withServer(async (baseUrl) => {
+    const auth = { authorization: 'Bearer test-ingress' };
+    const missingCandidate = await postJson(baseUrl, '/api/v1/memory-candidates/missing/promote', {}, auth);
+    assert.equal(missingCandidate.status, 404);
+    assert.equal(((await missingCandidate.json()) as { error: { code: string } }).error.code, 'AL_MEMORY_CANDIDATE_NOT_FOUND');
+
+    const fake = await postJson(baseUrl, '/api/v1/fake-im/events', { kind: 'dm', message_id: 'memory-msg-2', text: '用户喜欢结构化输出' }, auth);
+    const fakeBody = (await fake.json()) as { entry: { id: string } };
+    const resolved = await postJson(baseUrl, '/api/v1/sessions/resolve', { entry_id: fakeBody.entry.id }, auth);
+    const sessionId = ((await resolved.json()) as { session: { id: string } }).session.id;
+    const candidate = await postJson(baseUrl, '/api/v1/memory-candidates', { session_id: sessionId, candidate_text: '用户喜欢结构化输出' }, auth);
+    const candidateId = ((await candidate.json()) as { memory_candidate: { id: string } }).memory_candidate.id;
+    const rejected = await patchJson(baseUrl, `/api/v1/memory-candidates/${candidateId}/status`, { status: 'rejected', reason: 'too vague' }, auth);
+    assert.equal(rejected.status, 200);
+    const promoteRejected = await postJson(baseUrl, `/api/v1/memory-candidates/${candidateId}/promote`, {}, auth);
+    assert.equal(promoteRejected.status, 400);
+    assert.equal(((await promoteRejected.json()) as { error: { code: string } }).error.code, 'AL_BAD_REQUEST');
+
+    const missingMemory = await fetch(`${baseUrl}/api/v1/memories/missing`, { headers: auth });
+    assert.equal(missingMemory.status, 404);
   }, { ingressBearerToken: 'test-ingress' });
 });

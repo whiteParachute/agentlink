@@ -198,6 +198,18 @@ export class PostgresControlPlane implements AgentlinkControlPlanePort {
     return await this.withRepository((repository) => repository.setMemoryCandidateStatus(input));
   }
 
+  async promoteMemoryCandidate(input: { memoryCandidateId: string; reason?: string }) {
+    return await this.withRepository((repository) => repository.promoteMemoryCandidate(input));
+  }
+
+  async getMemory(id: string) {
+    return await this.withRepository((repository) => repository.getMemory(id));
+  }
+
+  async listMemories(sessionId: string) {
+    return await this.withRepository((repository) => repository.listMemories(sessionId));
+  }
+
   async revokeDevice(deviceId: string, reason?: string) {
     return await this.withRepository((repository) => repository.revokeDevice(deviceId, reason));
   }

@@ -398,3 +398,13 @@ test('memory candidate statements use row_to_json envelope and natural-key idemp
   assert.match(PostgreSqlStatements.updateMemoryCandidateStatus, /reason = COALESCE\(\$3, reason\)/i);
   assert.match(PostgreSqlStatements.updateMemoryCandidateStatus, /row_to_json\(mc\) AS memory_candidate/i);
 });
+
+test('memory statements use row_to_json envelope and candidate/natural-key idempotency shape', () => {
+  assert.match(PostgreSqlStatements.findMemoryById, /row_to_json\(m\) AS memory/i);
+  assert.match(PostgreSqlStatements.findMemoryByCandidateId, /WHERE m\.memory_candidate_id = \$1/i);
+  assert.match(PostgreSqlStatements.findMemoryByNaturalKey, /WHERE m\.session_id = \$1\s+AND m\.natural_key = \$2/is);
+  assert.match(PostgreSqlStatements.listMemoriesBySession, /ORDER BY m\.created_at ASC, m\.id ASC/i);
+  assert.match(PostgreSqlStatements.insertMemory, /INSERT INTO al_memory/i);
+  assert.match(PostgreSqlStatements.insertMemory, /'local'/i);
+  assert.match(PostgreSqlStatements.insertMemory, /SELECT row_to_json\(m\) AS memory\s+FROM inserted m/is);
+});

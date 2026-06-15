@@ -319,6 +319,28 @@ export interface MemoryCandidateRecord {
   updatedAt: string;
 }
 
+
+export interface MemoryRecord {
+  id: string;
+  sessionId: string;
+  memoryCandidateId?: string;
+  entryId?: string;
+  sourceEventId?: string;
+  memoryText: string;
+  naturalKey: string;
+  reason: string;
+  confidence?: number;
+  bridgeStatus: 'local';
+  metadata: JsonRecord;
+  retentionClass: RetentionClass;
+  memorySpace: string;
+  sourceSystem: string;
+  sensitivity: Sensitivity;
+  promotedAt: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface GroupContextProjection {
   groupProfile: GroupProfileRecord;
   platform: string;

@@ -974,3 +974,76 @@ test('memory candidate create validates referenced session, entry, source event,
     (error) => error instanceof AgentlinkError && error.code === 'AL_BAD_REQUEST',
   );
 });
+
+test('memory promotion is explicit, idempotent, append-only, and marks candidate accepted', () => {
+  const controlPlane = new InMemoryControlPlane({ now: () => new Date('2026-06-11T00:00:00.000Z') });
+  const ingested = controlPlane.ingestSourceEvent({
+    sourceSystem: 'fake-im',
+    sourceRef: 'memory:dm:1',
+    eventType: 'message.receive',
+    platform: 'fake-im',
+    entryType: 'dm',
+    externalChatId: 'dm-chat-memory-1',
+    externalMessageId: 'dm-memory-msg-1',
+    bodyText: '用户喜欢简洁回复',
+  });
+  const session = controlPlane.resolveSession({ entryId: ingested.entry.id }).session;
+  const candidate = controlPlane.createMemoryCandidate({
+    sessionId: session.id,
+    entryId: ingested.entry.id,
+    sourceEventId: ingested.sourceEvent.id,
+    candidateText: ' 用户喜欢简洁回复 ',
+    confidence: 0.75,
+    reason: 'manual',
+  }).memoryCandidate;
+
+  const acceptedOnly = controlPlane.setMemoryCandidateStatus({ memoryCandidateId: candidate.id, status: 'accepted', reason: 'reviewed' });
+  assert.equal(acceptedOnly.memoryCandidate.status, 'accepted');
+  assert.deepEqual(controlPlane.listMemories(session.id), []);
+
+  const first = controlPlane.promoteMemoryCandidate({ memoryCandidateId: candidate.id, reason: '用户确认' });
+  assert.equal(first.created, true);
+  assert.equal(first.memory.memoryCandidateId, candidate.id);
+  assert.equal(first.memory.sessionId, session.id);
+  assert.equal(first.memory.entryId, ingested.entry.id);
+  assert.equal(first.memory.sourceEventId, ingested.sourceEvent.id);
+  assert.equal(first.memory.memoryText, '用户喜欢简洁回复');
+  assert.equal(first.memory.naturalKey, candidate.naturalKey);
+  assert.equal(first.memory.reason, '用户确认');
+  assert.equal(first.memory.confidence, 0.75);
+  assert.equal(first.memory.bridgeStatus, 'local');
+  assert.equal(first.memory.retentionClass, 'memory');
+  assert.equal(first.memoryCandidate.status, 'accepted');
+  assert.equal(controlPlane.getMemory(first.memory.id)?.id, first.memory.id);
+  assert.deepEqual(controlPlane.listMemories(session.id).map((memory) => memory.id), [first.memory.id]);
+
+  const replay = controlPlane.promoteMemoryCandidate({ memoryCandidateId: candidate.id, reason: 'ignored' });
+  assert.equal(replay.created, false);
+  assert.equal(replay.memory.id, first.memory.id);
+  assert.equal(replay.memory.reason, '用户确认');
+});
+
+test('memory promotion rejects missing or rejected candidates', () => {
+  const controlPlane = new InMemoryControlPlane();
+  assert.throws(
+    () => controlPlane.promoteMemoryCandidate({ memoryCandidateId: 'missing-candidate' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_MEMORY_CANDIDATE_NOT_FOUND',
+  );
+  const ingested = controlPlane.ingestSourceEvent({
+    sourceSystem: 'fake-im',
+    sourceRef: 'memory:dm:2',
+    eventType: 'message.receive',
+    platform: 'fake-im',
+    entryType: 'dm',
+    externalChatId: 'dm-chat-memory-2',
+    externalMessageId: 'dm-memory-msg-2',
+    bodyText: '用户喜欢结构化输出',
+  });
+  const session = controlPlane.resolveSession({ entryId: ingested.entry.id }).session;
+  const candidate = controlPlane.createMemoryCandidate({ sessionId: session.id, candidateText: '用户喜欢结构化输出' }).memoryCandidate;
+  controlPlane.setMemoryCandidateStatus({ memoryCandidateId: candidate.id, status: 'rejected', reason: 'too vague' });
+  assert.throws(
+    () => controlPlane.promoteMemoryCandidate({ memoryCandidateId: candidate.id }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_BAD_REQUEST',
+  );
+});

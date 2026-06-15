@@ -321,8 +321,8 @@ See `docs/m1-control-plane-reuse-boundary.md` for the per-object classification,
 
 ## 2026-06-15 AL-M1-011 MemoryCandidate minimal model update
 
-- Added the AL-M1-011 MemoryCandidate minimal model as a reviewable candidate layer above existing SourceEvent / Entry / Session records. It does not create finalized long-term Memory records and does not add MemoryBridge, LLM summarization, embedding, search, Main Agent, Task routing, response gateway, frontend expansion, real Feishu productization, multi-tenant, or multi-MainUser behavior.
-- Updated only `migrations/0001_initial.sql`: added `al_memory_candidate` with `session_id` FK, optional `entry_id` / `source_event_id` references, `candidate_text`, review `status`, `reason`, optional `confidence`, stable `natural_key`, metadata, memory-candidate retention metadata, `UNIQUE(session_id, natural_key)`, and session/status/retention indexes. `al_memory` and `al_memory_bridge` remain absent.
+- Added the AL-M1-011 MemoryCandidate minimal model as a reviewable candidate layer above existing SourceEvent / Entry / Session records. It did not create finalized long-term Memory records in AL-M1-011 and did not add MemoryBridge, LLM summarization, embedding, search, Main Agent, Task routing, response gateway, frontend expansion, real Feishu productization, multi-tenant, or multi-MainUser behavior.
+- Updated only `migrations/0001_initial.sql`: added `al_memory_candidate` with `session_id` FK, optional `entry_id` / `source_event_id` references, `candidate_text`, review `status`, `reason`, optional `confidence`, stable `natural_key`, metadata, memory-candidate retention metadata, `UNIQUE(session_id, natural_key)`, and session/status/retention indexes. At AL-M1-011 time `al_memory` was intentionally deferred; `al_memory_bridge` remains absent.
 - Added `MemoryCandidateRecord` / `MemoryCandidateStatus` and `src/domain/memory-candidate.ts` for fail-closed validation of status/text/confidence plus delimiter-safe stable natural-key construction.
 - Added `MEMORY_CANDIDATE_RETENTION_DEFAULTS` as `memory_candidate/default/agentlink/internal`.
 - Wired explicit candidate operations through the control-plane port, in-memory implementation, PostgreSQL statements/repository, and Postgres adapter:
@@ -340,3 +340,26 @@ See `docs/m1-control-plane-reuse-boundary.md` for the per-object classification,
 - PostgreSQL methods use explicit `row_to_json(mc) AS memory_candidate` envelopes and recover unique-race inserts by re-reading durable candidates.
 - Tests added/updated for migration invariants, domain validation and natural keys, retention defaults, in-memory create/replay/list/status/references, PostgreSQL statement envelopes, repository create/replay/list/status/unique-race behavior, HTTP auth/201/200/get/list/patch/route-order/snake_case behavior, and no automatic candidate creation during ingress/session resolve.
 - Remaining risks: no live PostgreSQL DSN smoke was run unless `AGENTLINK_DATABASE_URL` is provided; true concurrent PostgreSQL races are covered by scripted repository tests only. Finalized Memory, MemoryBridge, LLM extraction/summarization, embedding/search, Main Agent, Task routing, response gateway, real Feishu/OAuth/webhook handling, frontend expansion, multi-tenant/multi-MainUser, cross-domain memory flow, and historical import remain intentionally out of scope.
+
+## 2026-06-15 AL-M1-012 Finalized Memory minimal model update
+
+- Added the AL-M1-012 finalized Memory minimal model as an append-only local memory layer promoted explicitly from existing MemoryCandidate records.
+- Updated only `migrations/0001_initial.sql`: added `al_memory` with `session_id`, optional provenance references (`memory_candidate_id`, `entry_id`, `source_event_id`), Markdown `memory_text`, stable `natural_key`, reason/confidence, `bridge_status = local`, metadata, `promoted_at`, memory retention metadata, `UNIQUE(session_id, natural_key)`, and session/candidate/retention indexes. `al_memory_bridge` remains absent.
+- Added `MemoryRecord`, `src/domain/memory.ts`, and `MEMORY_RETENTION_DEFAULTS` as `memory/default/agentlink/internal`.
+- Wired explicit promotion/read/list operations through the control-plane port, in-memory implementation, PostgreSQL statements/repository, and Postgres adapter:
+  - `promoteMemoryCandidate(candidateId, { reason? })`
+  - `getMemory(id)`
+  - `listMemories(sessionId)`
+- Promotion semantics are intentionally narrow:
+  - Memory cannot be directly created via `POST /api/v1/memories`.
+  - `PATCH /api/v1/memory-candidates/{id}/status` can mark a candidate accepted but does not auto-create Memory.
+  - `POST /api/v1/memory-candidates/{id}/promote` accepts pending/accepted candidates, rejects rejected candidates, reuses the candidate text/natural key/provenance/confidence, marks the candidate accepted, and is idempotent on replay.
+  - `bridge_status` is locked to `local`; no MemoryBridge, versioning, supersede, merge, deletion, embedding/search, or cross-domain flow is implemented.
+- Added HTTP endpoints behind the existing ingress bearer guard:
+  - `POST /api/v1/memory-candidates/{id}/promote`
+  - `GET /api/v1/memories/{id}`
+  - `GET /api/v1/sessions/{id}/memories`
+  `/api/v1/meta` now advertises `memory-api`.
+- PostgreSQL methods use explicit `row_to_json(m) AS memory` envelopes and retry unique-race promotion by rolling back and re-reading existing Memory rows.
+- Tests added/updated for migration invariants, domain validation, retention defaults, in-memory promotion/idempotency/rejected-candidate behavior, PostgreSQL statement envelopes, repository promote/replay/list/unique-race behavior, HTTP auth/201/200/404/400/list/get/route-order/snake_case behavior, and the no-auto-promote boundary.
+- Remaining risks: no live PostgreSQL DSN smoke was run unless `AGENTLINK_DATABASE_URL` is provided; true concurrent PostgreSQL races are covered by scripted repository tests only. MemoryBridge, LLM extraction/summarization, embedding/search, supersede/versioning/merge/delete, context package, Main Agent, Task routing, response gateway, real Feishu/OAuth/webhook handling, frontend expansion, multi-tenant/multi-MainUser, cross-domain memory flow, and historical import remain intentionally out of scope.

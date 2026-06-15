@@ -5,7 +5,7 @@ import { InMemoryControlPlane, type CreateTaskInput, type RegisterDeviceInput } 
 import { PostgresControlPlane } from './control-plane/postgres.js';
 import type { AgentlinkControlPlanePort } from './control-plane/port.js';
 import { PgRuntime } from './db/pg-client.js';
-import type { CapabilityGrantRecord, ChannelUserRecord, DeviceRecord, EntryRecord, GroupProfileRecord, JsonRecord, MainUserRecord, MemoryCandidateRecord, PlatformIdentityRecord, RunRecord, RunnerRecord, SourceEventRecord, SessionRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
+import type { CapabilityGrantRecord, ChannelUserRecord, DeviceRecord, EntryRecord, GroupProfileRecord, JsonRecord, MainUserRecord, MemoryCandidateRecord, MemoryRecord, PlatformIdentityRecord, RunRecord, RunnerRecord, SourceEventRecord, SessionRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
 import { mapFakeImEventToIngest, normalizeFakeImEvent, toFakeImEventDto } from './domain/fake-im.js';
 import { mapFeishuSampleEventToIngest, normalizeFeishuSampleEvent, toFeishuSampleEventDto } from './domain/feishu-sample.js';
 import { resolveReplyMode, type ReplyModeResolution } from './domain/reply-mode.js';
@@ -122,6 +122,7 @@ async function handleRequest(
         'reply-mode-api',
         'session-api',
         'memory-candidate-api',
+        'memory-api',
       ],
     });
     return;
@@ -398,11 +399,36 @@ async function handleRequest(
     return;
   }
 
+  const memoryCandidatePromoteMatch = /^\/api\/v1\/memory-candidates\/([^/]+)\/promote$/.exec(url.pathname);
+  if (req.method === 'POST' && memoryCandidatePromoteMatch) {
+    requireIngressBearer(req, security);
+    const body = await readJsonRecord(req);
+    const reason = optionalString(body, 'reason');
+    const result = await controlPlane.promoteMemoryCandidate({
+      memoryCandidateId: memoryCandidatePromoteMatch[1] ?? '',
+      ...(reason !== undefined ? { reason } : {}),
+    });
+    sendJson(res, result.created ? 201 : 200, {
+      memory: toMemoryDto(result.memory),
+      memory_candidate: toMemoryCandidateDto(result.memoryCandidate),
+      created: result.created,
+    });
+    return;
+  }
+
   const sessionMemoryCandidatesMatch = /^\/api\/v1\/sessions\/([^/]+)\/memory-candidates$/.exec(url.pathname);
   if (req.method === 'GET' && sessionMemoryCandidatesMatch) {
     requireIngressBearer(req, security);
     const memoryCandidates = await controlPlane.listMemoryCandidates(sessionMemoryCandidatesMatch[1] ?? '');
     sendJson(res, 200, { memory_candidates: memoryCandidates.map(toMemoryCandidateDto) });
+    return;
+  }
+
+  const sessionMemoriesMatch = /^\/api\/v1\/sessions\/([^/]+)\/memories$/.exec(url.pathname);
+  if (req.method === 'GET' && sessionMemoriesMatch) {
+    requireIngressBearer(req, security);
+    const memories = await controlPlane.listMemories(sessionMemoriesMatch[1] ?? '');
+    sendJson(res, 200, { memories: memories.map(toMemoryDto) });
     return;
   }
 
@@ -439,6 +465,15 @@ async function handleRequest(
   }
 
   const entryReplyModeMatch = /^\/api\/v1\/entries\/([^/]+)\/reply-mode$/.exec(url.pathname);
+  const memoryGetMatch = /^\/api\/v1\/memories\/([^/]+)$/.exec(url.pathname);
+  if (req.method === 'GET' && memoryGetMatch) {
+    requireIngressBearer(req, security);
+    const memory = await controlPlane.getMemory(memoryGetMatch[1] ?? '');
+    if (!memory) throw new AgentlinkError(404, 'AL_MEMORY_NOT_FOUND', 'Memory not found');
+    sendJson(res, 200, { memory: toMemoryDto(memory) });
+    return;
+  }
+
   if (req.method === 'GET' && entryReplyModeMatch) {
     requireIngressBearer(req, security);
     const entry = await controlPlane.getEntry(entryReplyModeMatch[1] ?? '');
@@ -1099,6 +1134,31 @@ function toMemoryCandidateDto(memoryCandidate: MemoryCandidateRecord) {
     },
     created_at: memoryCandidate.createdAt,
     updated_at: memoryCandidate.updatedAt,
+  };
+}
+
+function toMemoryDto(memory: MemoryRecord) {
+  return {
+    id: memory.id,
+    session_id: memory.sessionId,
+    memory_candidate_id: memory.memoryCandidateId,
+    entry_id: memory.entryId,
+    source_event_id: memory.sourceEventId,
+    memory_text: memory.memoryText,
+    natural_key: memory.naturalKey,
+    reason: memory.reason,
+    confidence: memory.confidence,
+    bridge_status: memory.bridgeStatus,
+    metadata: memory.metadata,
+    retention: {
+      retention_class: memory.retentionClass,
+      memory_space: memory.memorySpace,
+      source_system: memory.sourceSystem,
+      sensitivity: memory.sensitivity,
+    },
+    promoted_at: memory.promotedAt,
+    created_at: memory.createdAt,
+    updated_at: memory.updatedAt,
   };
 }
 

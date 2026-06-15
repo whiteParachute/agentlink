@@ -11,6 +11,7 @@ import type {
   LeaseRecord,
   MainUserRecord,
   MemoryCandidateRecord,
+  MemoryRecord,
   PlatformIdentityRecord,
   PolicyDecisionRecord,
   RecoverDecision,
@@ -61,6 +62,7 @@ import {
   GROUP_PROFILE_RETENTION_DEFAULTS,
   MAIN_USER_RETENTION_DEFAULTS,
   MEMORY_CANDIDATE_RETENTION_DEFAULTS,
+  MEMORY_RETENTION_DEFAULTS,
   PLATFORM_IDENTITY_RETENTION_DEFAULTS,
   SOURCE_EVENT_RETENTION_DEFAULTS,
   SESSION_RETENTION_DEFAULTS,
@@ -77,6 +79,7 @@ import {
   normalizeCandidateText,
   normalizeConfidence,
 } from '../domain/memory-candidate.js';
+import { normalizeBridgeStatus, normalizeMemoryText } from '../domain/memory.js';
 import { planSessionForEntry, type SessionDraft } from '../domain/session.js';
 import { decideRetry } from '../domain/retry.js';
 import { hashStable, stableStringify } from '../domain/signature.js';
@@ -184,6 +187,9 @@ export class InMemoryControlPlane {
   private readonly sessionUnique = new Map<string, string>();
   private readonly memoryCandidates = new Map<string, MemoryCandidateRecord>();
   private readonly memoryCandidateUnique = new Map<string, string>();
+  private readonly memories = new Map<string, MemoryRecord>();
+  private readonly memoryUnique = new Map<string, string>();
+  private readonly memoryByCandidate = new Map<string, string>();
 
   constructor(options: ControlPlaneOptions = {}) {
     this.now = options.now ?? (() => new Date());
@@ -899,6 +905,67 @@ export class InMemoryControlPlane {
     return { memoryCandidate: updated };
   }
 
+  promoteMemoryCandidate(input: { memoryCandidateId: string; reason?: string }): { memory: MemoryRecord; memoryCandidate: MemoryCandidateRecord; created: boolean } {
+    const candidate = this.mustGetMemoryCandidate(input.memoryCandidateId);
+    const existingByCandidateId = this.memoryByCandidate.get(candidate.id);
+    if (existingByCandidateId) {
+      const memory = this.mustGetMemory(existingByCandidateId);
+      return { memory, memoryCandidate: candidate, created: false };
+    }
+    if (candidate.status === 'rejected') throw new AgentlinkError(400, 'AL_BAD_REQUEST', 'rejected memory candidates cannot be promoted');
+    this.mustGetSession(candidate.sessionId);
+    const memoryText = normalizeMemoryText(candidate.candidateText);
+    const naturalKey = candidate.naturalKey;
+    const uniqueKey = memoryKey(candidate.sessionId, naturalKey);
+    const existingByNaturalKey = this.memoryUnique.get(uniqueKey);
+    const reason = input.reason !== undefined ? normalizeCandidateReason(input.reason) : candidate.reason;
+    const now = this.timestamp();
+    if (existingByNaturalKey) {
+      const acceptedCandidate: MemoryCandidateRecord = { ...candidate, status: 'accepted', reason, updatedAt: now };
+      this.memoryCandidates.set(acceptedCandidate.id, acceptedCandidate);
+      const memory = this.mustGetMemory(existingByNaturalKey);
+      return { memory, memoryCandidate: acceptedCandidate, created: false };
+    }
+    const retention = normalizeRetentionMetadata(undefined, MEMORY_RETENTION_DEFAULTS);
+    const memory: MemoryRecord = {
+      id: randomUUID(),
+      sessionId: candidate.sessionId,
+      memoryCandidateId: candidate.id,
+      ...(candidate.entryId !== undefined ? { entryId: candidate.entryId } : {}),
+      ...(candidate.sourceEventId !== undefined ? { sourceEventId: candidate.sourceEventId } : {}),
+      memoryText,
+      naturalKey,
+      reason,
+      ...(candidate.confidence !== undefined ? { confidence: candidate.confidence } : {}),
+      bridgeStatus: normalizeBridgeStatus('local'),
+      metadata: {},
+      retentionClass: retention.retentionClass,
+      memorySpace: retention.memorySpace,
+      sourceSystem: retention.sourceSystem,
+      sensitivity: retention.sensitivity,
+      promotedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const acceptedCandidate: MemoryCandidateRecord = { ...candidate, status: 'accepted', reason, updatedAt: now };
+    this.memories.set(memory.id, memory);
+    this.memoryUnique.set(uniqueKey, memory.id);
+    this.memoryByCandidate.set(candidate.id, memory.id);
+    this.memoryCandidates.set(acceptedCandidate.id, acceptedCandidate);
+    return { memory, memoryCandidate: acceptedCandidate, created: true };
+  }
+
+  getMemory(id: string): MemoryRecord | undefined {
+    return this.memories.get(id);
+  }
+
+  listMemories(sessionId: string): MemoryRecord[] {
+    this.mustGetSession(sessionId);
+    return [...this.memories.values()]
+      .filter((memory) => memory.sessionId === sessionId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  }
+
   revokeDevice(deviceId: string, reason = 'device_revoked'): { device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] } {
     const device = this.mustGetDevice(deviceId);
     if (device.status === 'REVOKED') return { device, tasks: [], runs: [], leases: [] };
@@ -1367,6 +1434,12 @@ export class InMemoryControlPlane {
     return memoryCandidate;
   }
 
+  private mustGetMemory(memoryId: string): MemoryRecord {
+    const memory = this.memories.get(memoryId);
+    if (!memory) throw new AgentlinkError(404, 'AL_MEMORY_NOT_FOUND', 'Memory not found');
+    return memory;
+  }
+
   private mustGetEntryBySourceEvent(sourceEventId: string): EntryRecord {
     const entryId = this.entryBySourceEvent.get(sourceEventId);
     if (!entryId) throw new AgentlinkError(404, 'AL_ENTRY_NOT_FOUND', 'Entry not found');
@@ -1619,6 +1692,10 @@ function sessionKey(sessionScope: string, naturalKey: string): string {
 }
 
 function memoryCandidateKey(sessionId: string, naturalKey: string): string {
+  return `${sessionId}:${naturalKey}`;
+}
+
+function memoryKey(sessionId: string, naturalKey: string): string {
   return `${sessionId}:${naturalKey}`;
 }
 

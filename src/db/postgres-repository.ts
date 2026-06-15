@@ -13,6 +13,7 @@ import type {
   LeaseRecord,
   MainUserRecord,
   MemoryCandidateRecord,
+  MemoryRecord,
   PlatformIdentityRecord,
   PolicyDecisionRecord,
   RecoverableRunRecord,
@@ -57,6 +58,7 @@ import {
   GROUP_PROFILE_RETENTION_DEFAULTS,
   MAIN_USER_RETENTION_DEFAULTS,
   MEMORY_CANDIDATE_RETENTION_DEFAULTS,
+  MEMORY_RETENTION_DEFAULTS,
   PLATFORM_IDENTITY_RETENTION_DEFAULTS,
   SOURCE_EVENT_RETENTION_DEFAULTS,
   SESSION_RETENTION_DEFAULTS,
@@ -73,6 +75,7 @@ import {
   normalizeCandidateText,
   normalizeConfidence,
 } from '../domain/memory-candidate.js';
+import { normalizeBridgeStatus, normalizeMemoryText } from '../domain/memory.js';
 import { planSessionForEntry, type SessionDraft } from '../domain/session.js';
 import { decideRetry } from '../domain/retry.js';
 import { hashStable, stableStringify } from '../domain/signature.js';
@@ -1129,6 +1132,27 @@ export class PostgreSqlRepository {
     return { memoryCandidate: mapMemoryCandidate(requireSingleRow(result, 'AL_INTERNAL', 'MemoryCandidate status update returned no row').memory_candidate) };
   }
 
+  async promoteMemoryCandidate(input: { memoryCandidateId: string; reason?: string }): Promise<{ memory: MemoryRecord; memoryCandidate: MemoryCandidateRecord; created: boolean }> {
+    try {
+      return await this.promoteMemoryCandidateOnce(input);
+    } catch (error: unknown) {
+      if (!isUniqueViolation(error)) throw error;
+      return await this.promoteMemoryCandidateOnce(input);
+    }
+  }
+
+  async getMemory(id: string): Promise<MemoryRecord | undefined> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.findMemoryById, [id]);
+    if (result.rowCount === 0) return undefined;
+    return mapMemory(requireSingleRow(result, 'AL_INTERNAL', 'Memory lookup returned rowCount without a row').memory);
+  }
+
+  async listMemories(sessionId: string): Promise<MemoryRecord[]> {
+    await this.mustFindSessionById(this.client, sessionId);
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.listMemoriesBySession, [sessionId]);
+    return result.rows.map((row) => mapMemory(row.memory));
+  }
+
   async revokeDevice(deviceId: string, reason = 'device_revoked'): Promise<{ device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] }> {
     return await withTransaction(this.client, async (tx) => {
       const now = this.timestamp();
@@ -1434,10 +1458,73 @@ export class PostgreSqlRepository {
     return mapSession(requireSingleRow(result, 'AL_INTERNAL', 'Session lookup returned rowCount without a row').session);
   }
 
+  private async promoteMemoryCandidateOnce(input: { memoryCandidateId: string; reason?: string }): Promise<{ memory: MemoryRecord; memoryCandidate: MemoryCandidateRecord; created: boolean }> {
+    return await withTransaction(this.client, async (tx) => {
+      const candidate = await this.findMemoryCandidateById(tx, input.memoryCandidateId);
+      if (!candidate) throw new AgentlinkError(404, 'AL_MEMORY_CANDIDATE_NOT_FOUND', 'Memory candidate not found');
+      const existingByCandidate = await this.findMemoryByCandidateId(tx, candidate.id);
+      if (existingByCandidate) return { memory: existingByCandidate, memoryCandidate: candidate, created: false };
+      if (candidate.status === 'rejected') throw new AgentlinkError(400, 'AL_BAD_REQUEST', 'rejected memory candidates cannot be promoted');
+      await this.mustFindSessionById(tx, candidate.sessionId);
+      const memoryText = normalizeMemoryText(candidate.candidateText);
+      const naturalKey = candidate.naturalKey;
+      const existingByNaturalKey = await this.findMemoryByNaturalKey(tx, candidate.sessionId, naturalKey);
+      const reason = input.reason !== undefined ? normalizeCandidateReason(input.reason) : candidate.reason;
+      const now = this.timestamp();
+      const memoryCandidate = mapMemoryCandidate(requireSingleRow(
+        await tx.query<EnvelopeRow>(PostgreSqlStatements.updateMemoryCandidateStatus, [candidate.id, 'accepted', reason, now]),
+        'AL_INTERNAL',
+        'MemoryCandidate status update returned no row',
+      ).memory_candidate);
+      if (existingByNaturalKey) return { memory: existingByNaturalKey, memoryCandidate, created: false };
+      const retention = normalizeRetentionMetadata(undefined, MEMORY_RETENTION_DEFAULTS);
+      const memory = mapMemory(requireSingleRow(
+        await tx.query<EnvelopeRow>(PostgreSqlStatements.insertMemory, [
+          randomUUID(),
+          candidate.sessionId,
+          candidate.id,
+          candidate.entryId ?? null,
+          candidate.sourceEventId ?? null,
+          memoryText,
+          naturalKey,
+          reason,
+          candidate.confidence ?? null,
+          toJsonbParam({}),
+          retention.retentionClass,
+          retention.memorySpace,
+          retention.sourceSystem,
+          retention.sensitivity,
+          now,
+        ]),
+        'AL_INTERNAL',
+        'Memory insert returned no row',
+      ).memory);
+      return { memory, memoryCandidate, created: true };
+    });
+  }
+
+  private async findMemoryCandidateById(client: SqlClient, memoryCandidateId: string): Promise<MemoryCandidateRecord | undefined> {
+    const result = await client.query<EnvelopeRow>(PostgreSqlStatements.findMemoryCandidateById, [memoryCandidateId]);
+    if (result.rowCount === 0) return undefined;
+    return mapMemoryCandidate(requireSingleRow(result, 'AL_INTERNAL', 'MemoryCandidate lookup returned rowCount without a row').memory_candidate);
+  }
+
   private async findMemoryCandidateByNaturalKey(client: SqlClient, sessionId: string, naturalKey: string): Promise<MemoryCandidateRecord | undefined> {
     const result = await client.query<EnvelopeRow>(PostgreSqlStatements.findMemoryCandidateByNaturalKey, [sessionId, naturalKey]);
     if (result.rowCount === 0) return undefined;
     return mapMemoryCandidate(requireSingleRow(result, 'AL_INTERNAL', 'MemoryCandidate lookup returned rowCount without a row').memory_candidate);
+  }
+
+  private async findMemoryByCandidateId(client: SqlClient, memoryCandidateId: string): Promise<MemoryRecord | undefined> {
+    const result = await client.query<EnvelopeRow>(PostgreSqlStatements.findMemoryByCandidateId, [memoryCandidateId]);
+    if (result.rowCount === 0) return undefined;
+    return mapMemory(requireSingleRow(result, 'AL_INTERNAL', 'Memory lookup returned rowCount without a row').memory);
+  }
+
+  private async findMemoryByNaturalKey(client: SqlClient, sessionId: string, naturalKey: string): Promise<MemoryRecord | undefined> {
+    const result = await client.query<EnvelopeRow>(PostgreSqlStatements.findMemoryByNaturalKey, [sessionId, naturalKey]);
+    if (result.rowCount === 0) return undefined;
+    return mapMemory(requireSingleRow(result, 'AL_INTERNAL', 'Memory lookup returned rowCount without a row').memory);
   }
 
   private async getOrCreateSession(client: SqlClient, draft: SessionDraft, retentionInput: RetentionMetadataInput | undefined): Promise<{ session: SessionRecord; created: boolean }> {
@@ -1499,6 +1586,7 @@ interface EnvelopeRow {
   entry?: unknown;
   session?: unknown;
   memory_candidate?: unknown;
+  memory?: unknown;
 }
 
 type RunEventRow = Record<string, unknown>;
@@ -1860,6 +1948,31 @@ function mapMemoryCandidate(value: unknown): MemoryCandidateRecord {
     createdAt: readTimestamp(row, 'created_at'),
     updatedAt: readTimestamp(row, 'updated_at'),
   };
+  setOptionalString(record, 'entryId', row.entry_id);
+  setOptionalString(record, 'sourceEventId', row.source_event_id);
+  setOptionalNumber(record, 'confidence', row.confidence);
+  return record;
+}
+
+function mapMemory(value: unknown): MemoryRecord {
+  const row = asRecord(value, 'memory');
+  const record: MemoryRecord = {
+    id: readString(row, 'id'),
+    sessionId: readString(row, 'session_id'),
+    memoryText: readString(row, 'memory_text'),
+    naturalKey: readString(row, 'natural_key'),
+    reason: readStringAllowEmpty(row, 'reason'),
+    bridgeStatus: normalizeBridgeStatus(readString(row, 'bridge_status')),
+    metadata: readJsonRecord(row, 'metadata'),
+    retentionClass: readRetentionClass(row, 'retention_class'),
+    memorySpace: readString(row, 'memory_space'),
+    sourceSystem: readString(row, 'source_system'),
+    sensitivity: readSensitivity(row, 'sensitivity'),
+    promotedAt: readTimestamp(row, 'promoted_at'),
+    createdAt: readTimestamp(row, 'created_at'),
+    updatedAt: readTimestamp(row, 'updated_at'),
+  };
+  setOptionalString(record, 'memoryCandidateId', row.memory_candidate_id);
   setOptionalString(record, 'entryId', row.entry_id);
   setOptionalString(record, 'sourceEventId', row.source_event_id);
   setOptionalNumber(record, 'confidence', row.confidence);

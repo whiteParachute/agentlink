@@ -8,6 +8,7 @@ import type {
   LeaseRecord,
   MainUserRecord,
   MemoryCandidateRecord,
+  MemoryRecord,
   PlatformIdentityRecord,
   RecoverDecision,
   RecoverableRunRecord,
@@ -142,4 +143,7 @@ export interface AgentlinkControlPlanePort {
   getMemoryCandidate(id: string): MaybePromise<MemoryCandidateRecord | undefined>;
   listMemoryCandidates(sessionId: string): MaybePromise<MemoryCandidateRecord[]>;
   setMemoryCandidateStatus(input: { memoryCandidateId: string; status: string; reason?: string }): MaybePromise<{ memoryCandidate: MemoryCandidateRecord }>;
+  promoteMemoryCandidate(input: { memoryCandidateId: string; reason?: string }): MaybePromise<{ memory: MemoryRecord; memoryCandidate: MemoryCandidateRecord; created: boolean }>;
+  getMemory(id: string): MaybePromise<MemoryRecord | undefined>;
+  listMemories(sessionId: string): MaybePromise<MemoryRecord[]>;
 }
