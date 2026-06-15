@@ -5,7 +5,7 @@ import { InMemoryControlPlane, type CreateTaskInput, type RegisterDeviceInput } 
 import { PostgresControlPlane } from './control-plane/postgres.js';
 import type { AgentlinkControlPlanePort } from './control-plane/port.js';
 import { PgRuntime } from './db/pg-client.js';
-import type { CapabilityGrantRecord, ChannelUserRecord, DeviceRecord, GroupProfileRecord, JsonRecord, MainUserRecord, PlatformIdentityRecord, RunRecord, RunnerRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
+import type { CapabilityGrantRecord, ChannelUserRecord, DeviceRecord, EntryRecord, GroupProfileRecord, JsonRecord, MainUserRecord, PlatformIdentityRecord, RunRecord, RunnerRecord, SourceEventRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
 import { RetentionMetadataError, type RetentionMetadataInput } from './domain/retention.js';
 import type { RunStatus } from './domain/status.js';
 import { sendJson } from './http/json.js';
@@ -18,13 +18,19 @@ export interface ServerInfo {
 
 export interface AgentlinkServerOptions {
   controlPlane?: AgentlinkControlPlanePort;
+  ingressBearerToken?: string;
+}
+
+interface IngressSecurityOptions {
+  ingressBearerToken?: string;
 }
 
 export function createAgentlinkServer(info: ServerInfo, options: AgentlinkServerOptions = {}) {
   const controlPlane = options.controlPlane ?? new InMemoryControlPlane();
+  const security = ingressSecurityOptions(options);
 
   return createServer((req: IncomingMessage, res: ServerResponse) => {
-    void handleRequest(req, res, info, controlPlane).catch((error: unknown) => {
+    void handleRequest(req, res, info, controlPlane, security).catch((error: unknown) => {
       if (isAgentlinkError(error)) {
         sendJson(res, error.statusCode, { ok: false, error: { code: error.code, message: error.message, details: error.details } });
         return;
@@ -51,7 +57,12 @@ export function createAgentlinkServerFromConfig(config: AgentlinkConfig) {
       : undefined;
   const server = createAgentlinkServer(
     { name: config.serviceName, version: '0.1.0', environment: config.environment },
-    { controlPlane: runtime ? new PostgresControlPlane(runtime) : new InMemoryControlPlane() },
+    {
+      controlPlane: runtime
+        ? new PostgresControlPlane(runtime, sourceHashOptions(config))
+        : new InMemoryControlPlane(sourceHashOptions(config)),
+      ...(config.ingressBearerToken ? { ingressBearerToken: config.ingressBearerToken } : {}),
+    },
   );
   if (runtime) server.on('close', () => void runtime.close());
   return server;
@@ -62,6 +73,7 @@ async function handleRequest(
   res: ServerResponse,
   info: ServerInfo,
   controlPlane: AgentlinkControlPlanePort,
+  security: IngressSecurityOptions,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', 'http://localhost');
 
@@ -95,6 +107,7 @@ async function handleRequest(
         'agentlet-complete',
         'channel-user-api',
         'group-profile-api',
+        'ingress-api',
       ],
     });
     return;
@@ -228,6 +241,88 @@ async function handleRequest(
     const groupProfile = await controlPlane.getGroupProfile(groupProfileGetMatch[1] ?? '');
     if (!groupProfile) throw new AgentlinkError(404, 'AL_GROUP_PROFILE_NOT_FOUND', 'Group profile not found');
     sendJson(res, 200, { group_profile: toGroupProfileDto(groupProfile) });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v1/ingress/events') {
+    requireIngressBearer(req, security);
+    const body = await readJsonRecord(req);
+    const platform = optionalString(body, 'platform');
+    const occurredAt = optionalString(body, 'occurred_at');
+    const payload = optionalRecord(body, 'payload');
+    const metadata = optionalRecord(body, 'metadata');
+    const entryType = optionalString(body, 'entry_type');
+    const externalChatId = optionalString(body, 'external_chat_id');
+    const externalThreadId = optionalString(body, 'external_thread_id');
+    const externalMessageId = optionalString(body, 'external_message_id');
+    const speakerChannelUserId = optionalString(body, 'speaker_channel_user_id');
+    const groupProfileId = optionalString(body, 'group_profile_id');
+    const agentMentioned = optionalBoolean(body, 'agent_mentioned');
+    const bodyText = optionalString(body, 'body_text');
+    const entryMetadata = optionalRecord(body, 'entry_metadata');
+    const retention = optionalRetention(body, 'retention');
+    const result = await controlPlane.ingestSourceEvent({
+      sourceSystem: requireString(body, 'source_system'),
+      sourceRef: requireString(body, 'source_ref'),
+      eventType: requireString(body, 'event_type'),
+      ...(platform !== undefined ? { platform } : {}),
+      ...(occurredAt !== undefined ? { occurredAt } : {}),
+      ...(payload !== undefined ? { payload } : {}),
+      ...(metadata !== undefined ? { metadata } : {}),
+      ...(entryType !== undefined ? { entryType } : {}),
+      ...(externalChatId !== undefined ? { externalChatId } : {}),
+      ...(externalThreadId !== undefined ? { externalThreadId } : {}),
+      ...(externalMessageId !== undefined ? { externalMessageId } : {}),
+      ...(speakerChannelUserId !== undefined ? { speakerChannelUserId } : {}),
+      ...(groupProfileId !== undefined ? { groupProfileId } : {}),
+      ...(agentMentioned !== undefined ? { agentMentioned } : {}),
+      ...(bodyText !== undefined ? { bodyText } : {}),
+      ...(entryMetadata !== undefined ? { entryMetadata } : {}),
+      ...(retention ? { retention } : {}),
+    });
+    sendJson(res, result.created ? 201 : 200, {
+      source_event: toSourceEventDto(result.sourceEvent),
+      entry: toEntryDto(result.entry),
+      created: result.created,
+    });
+    return;
+  }
+
+  if (req.method === 'GET' && url.pathname === '/api/v1/source-events/resolve') {
+    requireIngressBearer(req, security);
+    const sourceEvent = await controlPlane.resolveSourceEvent({
+      sourceSystem: requireQueryString(url, 'source_system'),
+      sourceRef: requireQueryString(url, 'source_ref'),
+    });
+    if (!sourceEvent) throw new AgentlinkError(404, 'AL_SOURCE_EVENT_NOT_FOUND', 'Source event not found');
+    sendJson(res, 200, { source_event: toSourceEventDto(sourceEvent) });
+    return;
+  }
+
+  const sourceEventEntryMatch = /^\/api\/v1\/source-events\/([^/]+)\/entry$/.exec(url.pathname);
+  if (req.method === 'GET' && sourceEventEntryMatch) {
+    requireIngressBearer(req, security);
+    const entry = await controlPlane.getEntryBySourceEvent(sourceEventEntryMatch[1] ?? '');
+    if (!entry) throw new AgentlinkError(404, 'AL_ENTRY_NOT_FOUND', 'Entry not found');
+    sendJson(res, 200, { entry: toEntryDto(entry) });
+    return;
+  }
+
+  const sourceEventGetMatch = /^\/api\/v1\/source-events\/([^/]+)$/.exec(url.pathname);
+  if (req.method === 'GET' && sourceEventGetMatch) {
+    requireIngressBearer(req, security);
+    const sourceEvent = await controlPlane.getSourceEvent(sourceEventGetMatch[1] ?? '');
+    if (!sourceEvent) throw new AgentlinkError(404, 'AL_SOURCE_EVENT_NOT_FOUND', 'Source event not found');
+    sendJson(res, 200, { source_event: toSourceEventDto(sourceEvent) });
+    return;
+  }
+
+  const entryGetMatch = /^\/api\/v1\/entries\/([^/]+)$/.exec(url.pathname);
+  if (req.method === 'GET' && entryGetMatch) {
+    requireIngressBearer(req, security);
+    const entry = await controlPlane.getEntry(entryGetMatch[1] ?? '');
+    if (!entry) throw new AgentlinkError(404, 'AL_ENTRY_NOT_FOUND', 'Entry not found');
+    sendJson(res, 200, { entry: toEntryDto(entry) });
     return;
   }
 
@@ -795,10 +890,66 @@ function toGroupProfileDto(groupProfile: GroupProfileRecord) {
   };
 }
 
+function toSourceEventDto(sourceEvent: SourceEventRecord) {
+  return {
+    id: sourceEvent.id,
+    source_system: sourceEvent.sourceSystem,
+    source_ref: sourceEvent.sourceRef,
+    source_hash: sourceEvent.sourceHash,
+    event_type: sourceEvent.eventType,
+    platform: sourceEvent.platform,
+    occurred_at: sourceEvent.occurredAt,
+    received_at: sourceEvent.receivedAt,
+    payload: sourceEvent.payload,
+    metadata: sourceEvent.metadata,
+    retention: {
+      retention_class: sourceEvent.retentionClass,
+      memory_space: sourceEvent.memorySpace,
+      source_system: sourceEvent.sourceSystem,
+      sensitivity: sourceEvent.sensitivity,
+    },
+    created_at: sourceEvent.createdAt,
+    updated_at: sourceEvent.updatedAt,
+  };
+}
+
+function toEntryDto(entry: EntryRecord) {
+  return {
+    id: entry.id,
+    source_event_id: entry.sourceEventId,
+    entry_type: entry.entryType,
+    platform: entry.platform,
+    external_chat_id: entry.externalChatId,
+    external_thread_id: entry.externalThreadId,
+    external_message_id: entry.externalMessageId,
+    speaker_channel_user_id: entry.speakerChannelUserId,
+    group_profile_id: entry.groupProfileId,
+    agent_mentioned: entry.agentMentioned,
+    body_text: entry.bodyText,
+    metadata: entry.metadata,
+    retention: {
+      retention_class: entry.retentionClass,
+      memory_space: entry.memorySpace,
+      source_system: entry.sourceSystem,
+      sensitivity: entry.sensitivity,
+    },
+    created_at: entry.createdAt,
+    updated_at: entry.updatedAt,
+  };
+}
+
 async function ensureLeaseBelongsToDevice(controlPlane: AgentlinkControlPlanePort, leaseId: string, deviceId: string): Promise<void> {
   const lease = await controlPlane.getLease(leaseId);
   if (!lease) throw new AgentlinkError(404, 'AL_LEASE_NOT_FOUND', 'Lease not found');
   if (lease.deviceId !== deviceId) throw new AgentlinkError(403, 'AL_RUN_001', 'Lease does not belong to this device');
+}
+
+function sourceHashOptions(config: AgentlinkConfig): { sourceHashSecret?: string } {
+  return config.sourceHashSecret ? { sourceHashSecret: config.sourceHashSecret } : {};
+}
+
+function ingressSecurityOptions(options: { ingressBearerToken?: string }): IngressSecurityOptions {
+  return options.ingressBearerToken ? { ingressBearerToken: options.ingressBearerToken } : {};
 }
 
 function requireDatabaseUrl(config: AgentlinkConfig): string {
@@ -844,6 +995,15 @@ function requireBearer(req: IncomingMessage): string {
   return header.slice('Bearer '.length);
 }
 
+function requireIngressBearer(req: IncomingMessage, security: IngressSecurityOptions): void {
+  if (!security.ingressBearerToken) return;
+  const header = req.headers.authorization;
+  if (!header?.startsWith('Bearer ')) throw new AgentlinkError(401, 'AL_AUTH_REQUIRED', 'Bearer ingress token is required');
+  if (header.slice('Bearer '.length) !== security.ingressBearerToken) {
+    throw new AgentlinkError(403, 'AL_FORBIDDEN', 'Invalid ingress bearer token');
+  }
+}
+
 function requireString(body: JsonRecord, key: string): string {
   const value = body[key];
   if (typeof value !== 'string' || value.length === 0) throw new AgentlinkError(400, 'AL_BAD_REQUEST', `${key} must be a non-empty string`);
@@ -867,6 +1027,13 @@ function optionalNonEmptyString(body: JsonRecord, key: string): string | undefin
 
 function requireBoolean(body: JsonRecord, key: string): boolean {
   const value = body[key];
+  if (typeof value !== 'boolean') throw new AgentlinkError(400, 'AL_BAD_REQUEST', `${key} must be a boolean`);
+  return value;
+}
+
+function optionalBoolean(body: JsonRecord, key: string): boolean | undefined {
+  const value = body[key];
+  if (value === undefined) return undefined;
   if (typeof value !== 'boolean') throw new AgentlinkError(400, 'AL_BAD_REQUEST', `${key} must be a boolean`);
   return value;
 }

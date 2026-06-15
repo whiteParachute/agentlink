@@ -7,6 +7,7 @@ import type {
   ControlActionRecord,
   DeviceRecord,
   Domain,
+  EntryRecord,
   GroupProfileRecord,
   JsonRecord,
   LeaseRecord,
@@ -17,6 +18,7 @@ import type {
   RunEventRecord,
   RunRecord,
   RunnerRecord,
+  SourceEventRecord,
   TaskRecord,
   WorkdirAccessMode,
   WorkdirGrantRecord,
@@ -34,13 +36,26 @@ import {
   normalizeGroupToken,
   normalizeReplyMode,
 } from '../domain/group-profile.js';
+import {
+  normalizeBodyText,
+  normalizeEntryType,
+  normalizeEventType,
+  normalizeExternalRef,
+  normalizeIngressPlatform,
+  normalizeOccurredAt,
+  normalizeSourceRef,
+  normalizeSourceSystem,
+} from '../domain/ingress.js';
+import { createSourceHash, resolveSourceHashSecret } from '../domain/source-hash.js';
 import { evaluateDispatchPolicy } from '../domain/policy.js';
 import {
   CHANNEL_USER_RETENTION_DEFAULTS,
   EVENT_RETENTION_DEFAULTS,
+  ENTRY_RETENTION_DEFAULTS,
   GROUP_PROFILE_RETENTION_DEFAULTS,
   MAIN_USER_RETENTION_DEFAULTS,
   PLATFORM_IDENTITY_RETENTION_DEFAULTS,
+  SOURCE_EVENT_RETENTION_DEFAULTS,
   TASK_RETENTION_DEFAULTS,
   normalizeRetentionMetadata,
   type RetentionMetadata,
@@ -56,6 +71,7 @@ import { withTransaction, type SqlClient, type SqlQueryResult } from './transact
 export interface PostgreSqlRepositoryOptions {
   now?: () => Date;
   leaseTtlMs?: number;
+  sourceHashSecret?: string;
 }
 
 export interface CreateTaskRepositoryResult {
@@ -131,10 +147,12 @@ export interface ExpireLeaseResult {
 export class PostgreSqlRepository {
   private readonly now: () => Date;
   private readonly leaseTtlMs: number;
+  private readonly sourceHashSecret: string;
 
   constructor(private readonly client: SqlClient, options: PostgreSqlRepositoryOptions = {}) {
     this.now = options.now ?? (() => new Date());
     this.leaseTtlMs = options.leaseTtlMs ?? 5 * 60 * 1000;
+    this.sourceHashSecret = options.sourceHashSecret ?? resolveSourceHashSecret().secret;
   }
 
   async getTask(taskId: string): Promise<{ task: TaskRecord; run?: RunRecord } | undefined> {
@@ -881,6 +899,126 @@ export class PostgreSqlRepository {
     return { groupProfile: mapGroupProfile(requireSingleRow(result, 'AL_INTERNAL', 'GroupProfile defaults update returned no row').group_profile) };
   }
 
+  async ingestSourceEvent(input: {
+    sourceSystem: string;
+    sourceRef: string;
+    eventType: string;
+    platform?: string;
+    occurredAt?: string;
+    payload?: JsonRecord;
+    metadata?: JsonRecord;
+    entryType?: string;
+    externalChatId?: string;
+    externalThreadId?: string;
+    externalMessageId?: string;
+    speakerChannelUserId?: string;
+    groupProfileId?: string;
+    agentMentioned?: boolean;
+    bodyText?: string;
+    entryMetadata?: JsonRecord;
+    retention?: RetentionMetadataInput;
+  }): Promise<{ sourceEvent: SourceEventRecord; entry: EntryRecord; created: boolean }> {
+    const sourceSystem = normalizeSourceSystem(input.sourceSystem);
+    const sourceRef = normalizeSourceRef(input.sourceRef);
+    const sourceHash = createSourceHash({ sourceSystem, sourceRef, secret: this.sourceHashSecret });
+    const platform = normalizeIngressPlatform(input.platform);
+    const externalChatId = normalizeExternalRef(input.externalChatId, 'external_chat_id');
+    const externalThreadId = normalizeExternalRef(input.externalThreadId, 'external_thread_id');
+    const externalMessageId = normalizeExternalRef(input.externalMessageId, 'external_message_id');
+
+    try {
+      return await withTransaction(this.client, async (tx) => {
+        const existing = await this.findSourceEventByNaturalKey(tx, sourceSystem, sourceHash);
+        if (existing) {
+          const entry = await this.findEntryBySourceEventId(tx, existing.id);
+          if (!entry) throw new AgentlinkError(404, 'AL_ENTRY_NOT_FOUND', 'Entry not found');
+          return { sourceEvent: existing, entry, created: false };
+        }
+
+        if (input.speakerChannelUserId) await this.mustFindChannelUserById(tx, input.speakerChannelUserId);
+        if (input.groupProfileId) await this.mustFindGroupProfileById(tx, input.groupProfileId);
+
+        const now = this.timestamp();
+        const eventRetention = normalizeRetentionMetadata({ ...input.retention, sourceSystem }, { ...SOURCE_EVENT_RETENTION_DEFAULTS, sourceSystem });
+        const entryRetention = normalizeRetentionMetadata({ ...input.retention, sourceSystem }, { ...ENTRY_RETENTION_DEFAULTS, sourceSystem });
+        const sourceEvent = mapSourceEvent(requireSingleRow(
+          await tx.query<EnvelopeRow>(PostgreSqlStatements.insertSourceEvent, [
+            randomUUID(),
+            sourceSystem,
+            sourceRef,
+            sourceHash,
+            normalizeEventType(input.eventType),
+            platform ?? null,
+            normalizeOccurredAt(input.occurredAt, now),
+            now,
+            toJsonbParam(input.payload ?? {}),
+            toJsonbParam(input.metadata ?? {}),
+            eventRetention.retentionClass,
+            eventRetention.memorySpace,
+            eventRetention.sensitivity,
+            now,
+          ]),
+          'AL_INTERNAL',
+          'SourceEvent insert returned no row',
+        ).source_event);
+        const entry = mapEntry(requireSingleRow(
+          await tx.query<EnvelopeRow>(PostgreSqlStatements.insertEntry, [
+            randomUUID(),
+            sourceEvent.id,
+            normalizeEntryType(input.entryType),
+            platform ?? null,
+            externalChatId ?? null,
+            externalThreadId ?? null,
+            externalMessageId ?? null,
+            input.speakerChannelUserId ?? null,
+            input.groupProfileId ?? null,
+            input.agentMentioned ?? false,
+            normalizeBodyText(input.bodyText),
+            toJsonbParam(input.entryMetadata ?? {}),
+            entryRetention.retentionClass,
+            entryRetention.memorySpace,
+            entryRetention.sourceSystem,
+            entryRetention.sensitivity,
+            now,
+          ]),
+          'AL_INTERNAL',
+          'Entry insert returned no row',
+        ).entry);
+        return { sourceEvent, entry, created: true };
+      });
+    } catch (error: unknown) {
+      if (!isUniqueViolation(error)) throw error;
+      const sourceEvent = await this.resolveSourceEvent({ sourceSystem, sourceRef });
+      if (!sourceEvent) throw error;
+      const entry = await this.getEntryBySourceEvent(sourceEvent.id);
+      if (!entry) throw new AgentlinkError(404, 'AL_ENTRY_NOT_FOUND', 'Entry not found');
+      return { sourceEvent, entry, created: false };
+    }
+  }
+
+  async getSourceEvent(id: string): Promise<SourceEventRecord | undefined> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.findSourceEventById, [id]);
+    if (result.rowCount === 0) return undefined;
+    return mapSourceEvent(requireSingleRow(result, 'AL_INTERNAL', 'SourceEvent lookup returned rowCount without a row').source_event);
+  }
+
+  async resolveSourceEvent(input: { sourceSystem: string; sourceRef: string }): Promise<SourceEventRecord | undefined> {
+    const sourceSystem = normalizeSourceSystem(input.sourceSystem);
+    const sourceRef = normalizeSourceRef(input.sourceRef);
+    const sourceHash = createSourceHash({ sourceSystem, sourceRef, secret: this.sourceHashSecret });
+    return await this.findSourceEventByNaturalKey(this.client, sourceSystem, sourceHash);
+  }
+
+  async getEntry(id: string): Promise<EntryRecord | undefined> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.findEntryById, [id]);
+    if (result.rowCount === 0) return undefined;
+    return mapEntry(requireSingleRow(result, 'AL_INTERNAL', 'Entry lookup returned rowCount without a row').entry);
+  }
+
+  async getEntryBySourceEvent(sourceEventId: string): Promise<EntryRecord | undefined> {
+    return await this.findEntryBySourceEventId(this.client, sourceEventId);
+  }
+
   async revokeDevice(deviceId: string, reason = 'device_revoked'): Promise<{ device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] }> {
     return await withTransaction(this.client, async (tx) => {
       const now = this.timestamp();
@@ -1057,6 +1195,30 @@ export class PostgreSqlRepository {
     return mapGroupProfile(requireSingleRow(result, 'AL_INTERNAL', 'GroupProfile lookup returned rowCount without a row').group_profile);
   }
 
+  private async findSourceEventByNaturalKey(client: SqlClient, sourceSystem: string, sourceHash: string): Promise<SourceEventRecord | undefined> {
+    const result = await client.query<EnvelopeRow>(PostgreSqlStatements.findSourceEventByNaturalKey, [sourceSystem, sourceHash]);
+    if (result.rowCount === 0) return undefined;
+    return mapSourceEvent(requireSingleRow(result, 'AL_INTERNAL', 'SourceEvent lookup returned rowCount without a row').source_event);
+  }
+
+  private async findEntryBySourceEventId(client: SqlClient, sourceEventId: string): Promise<EntryRecord | undefined> {
+    const result = await client.query<EnvelopeRow>(PostgreSqlStatements.findEntryBySourceEventId, [sourceEventId]);
+    if (result.rowCount === 0) return undefined;
+    return mapEntry(requireSingleRow(result, 'AL_INTERNAL', 'Entry lookup returned rowCount without a row').entry);
+  }
+
+  private async mustFindChannelUserById(client: SqlClient, channelUserId: string): Promise<ChannelUserRecord> {
+    const result = await client.query<EnvelopeRow>(PostgreSqlStatements.findChannelUserById, [channelUserId]);
+    if (result.rowCount === 0) throw new AgentlinkError(404, 'AL_CHANNEL_USER_NOT_FOUND', 'Channel user not found');
+    return mapChannelUser(requireSingleRow(result, 'AL_INTERNAL', 'ChannelUser lookup returned rowCount without a row').channel_user);
+  }
+
+  private async mustFindGroupProfileById(client: SqlClient, groupProfileId: string): Promise<GroupProfileRecord> {
+    const result = await client.query<EnvelopeRow>(PostgreSqlStatements.findGroupProfileById, [groupProfileId]);
+    if (result.rowCount === 0) throw new AgentlinkError(404, 'AL_GROUP_PROFILE_NOT_FOUND', 'Group profile not found');
+    return mapGroupProfile(requireSingleRow(result, 'AL_INTERNAL', 'GroupProfile lookup returned rowCount without a row').group_profile);
+  }
+
   private async updateExistingGroupProfile(
     client: SqlClient,
     existing: GroupProfileRecord,
@@ -1121,6 +1283,8 @@ interface EnvelopeRow {
   channel_user?: unknown;
   platform_identity?: unknown;
   group_profile?: unknown;
+  source_event?: unknown;
+  entry?: unknown;
 }
 
 type RunEventRow = Record<string, unknown>;
@@ -1442,6 +1606,53 @@ function mapGroupProfile(value: unknown): GroupProfileRecord {
   };
 }
 
+function mapSourceEvent(value: unknown): SourceEventRecord {
+  const row = asRecord(value, 'source_event');
+  const record: SourceEventRecord = {
+    id: readString(row, 'id'),
+    sourceSystem: readString(row, 'source_system'),
+    sourceRef: readString(row, 'source_ref'),
+    sourceHash: readString(row, 'source_hash'),
+    eventType: readString(row, 'event_type'),
+    occurredAt: readTimestamp(row, 'occurred_at'),
+    receivedAt: readTimestamp(row, 'received_at'),
+    payload: readJsonRecord(row, 'payload'),
+    metadata: readJsonRecord(row, 'metadata'),
+    retentionClass: readRetentionClass(row, 'retention_class'),
+    memorySpace: readString(row, 'memory_space'),
+    sensitivity: readSensitivity(row, 'sensitivity'),
+    createdAt: readTimestamp(row, 'created_at'),
+    updatedAt: readTimestamp(row, 'updated_at'),
+  };
+  setOptionalString(record, 'platform', row.platform);
+  return record;
+}
+
+function mapEntry(value: unknown): EntryRecord {
+  const row = asRecord(value, 'entry');
+  const record: EntryRecord = {
+    id: readString(row, 'id'),
+    sourceEventId: readString(row, 'source_event_id'),
+    entryType: readString(row, 'entry_type') as EntryRecord['entryType'],
+    agentMentioned: readBoolean(row, 'agent_mentioned'),
+    bodyText: readStringAllowEmpty(row, 'body_text'),
+    metadata: readJsonRecord(row, 'metadata'),
+    retentionClass: readRetentionClass(row, 'retention_class'),
+    memorySpace: readString(row, 'memory_space'),
+    sourceSystem: readString(row, 'source_system'),
+    sensitivity: readSensitivity(row, 'sensitivity'),
+    createdAt: readTimestamp(row, 'created_at'),
+    updatedAt: readTimestamp(row, 'updated_at'),
+  };
+  setOptionalString(record, 'platform', row.platform);
+  setOptionalString(record, 'externalChatId', row.external_chat_id);
+  setOptionalString(record, 'externalThreadId', row.external_thread_id);
+  setOptionalString(record, 'externalMessageId', row.external_message_id);
+  setOptionalString(record, 'speakerChannelUserId', row.speaker_channel_user_id);
+  setOptionalString(record, 'groupProfileId', row.group_profile_id);
+  return record;
+}
+
 
 function asRecord(value: unknown, label: string): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AgentlinkError(500, 'AL_REPOSITORY_MAPPING', `${label} row is not an object`);
@@ -1459,6 +1670,18 @@ function readNumber(row: Record<string, unknown>, key: string): number {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'bigint') return Number(value);
   throw new AgentlinkError(500, 'AL_REPOSITORY_MAPPING', `${key} must be a number`);
+}
+
+function readStringAllowEmpty(row: Record<string, unknown>, key: string): string {
+  const value = row[key];
+  if (typeof value !== 'string') throw new AgentlinkError(500, 'AL_REPOSITORY_MAPPING', `${key} must be a string`);
+  return value;
+}
+
+function readBoolean(row: Record<string, unknown>, key: string): boolean {
+  const value = row[key];
+  if (typeof value !== 'boolean') throw new AgentlinkError(500, 'AL_REPOSITORY_MAPPING', `${key} must be a boolean`);
+  return value;
 }
 
 function readStringArray(row: Record<string, unknown>, key: string): string[] {

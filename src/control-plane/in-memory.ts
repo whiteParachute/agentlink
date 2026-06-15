@@ -5,6 +5,7 @@ import type {
   ControlActionRecord,
   DeviceRecord,
   Domain,
+  EntryRecord,
   GroupProfileRecord,
   JsonRecord,
   LeaseRecord,
@@ -16,6 +17,7 @@ import type {
   RunEventRecord,
   RunRecord,
   RunnerRecord,
+  SourceEventRecord,
   TaskRecord,
   WorkdirAccessMode,
   WorkdirGrantRecord,
@@ -38,13 +40,26 @@ import {
   normalizeGroupToken,
   normalizeReplyMode,
 } from '../domain/group-profile.js';
+import {
+  normalizeBodyText,
+  normalizeEntryType,
+  normalizeEventType,
+  normalizeExternalRef,
+  normalizeIngressPlatform,
+  normalizeOccurredAt,
+  normalizeSourceRef,
+  normalizeSourceSystem,
+} from '../domain/ingress.js';
+import { createSourceHash, resolveSourceHashSecret } from '../domain/source-hash.js';
 import { evaluateDispatchPolicy } from '../domain/policy.js';
 import {
   CHANNEL_USER_RETENTION_DEFAULTS,
   EVENT_RETENTION_DEFAULTS,
+  ENTRY_RETENTION_DEFAULTS,
   GROUP_PROFILE_RETENTION_DEFAULTS,
   MAIN_USER_RETENTION_DEFAULTS,
   PLATFORM_IDENTITY_RETENTION_DEFAULTS,
+  SOURCE_EVENT_RETENTION_DEFAULTS,
   TASK_RETENTION_DEFAULTS,
   normalizeRetentionMetadata,
   withoutRawRetention,
@@ -61,6 +76,7 @@ export interface ControlPlaneOptions {
   now?: () => Date;
   leaseTtlMs?: number;
   defaultWorkspace?: string;
+  sourceHashSecret?: string;
 }
 
 export interface CreateTaskInput {
@@ -130,6 +146,7 @@ export class InMemoryControlPlane {
   private readonly now: () => Date;
   private readonly leaseTtlMs: number;
   private readonly defaultWorkspace: string;
+  private readonly sourceHashSecret: string;
   private readonly tasks = new Map<string, TaskRecord>();
   private readonly runs = new Map<string, RunRecord>();
   private readonly devices = new Map<string, DeviceRecord>();
@@ -147,11 +164,16 @@ export class InMemoryControlPlane {
   private readonly platformIdentityUnique = new Map<string, string>();
   private readonly groupProfiles = new Map<string, GroupProfileRecord>();
   private readonly groupProfileUnique = new Map<string, string>();
+  private readonly sourceEvents = new Map<string, SourceEventRecord>();
+  private readonly sourceEventUnique = new Map<string, string>();
+  private readonly entries = new Map<string, EntryRecord>();
+  private readonly entryBySourceEvent = new Map<string, string>();
 
   constructor(options: ControlPlaneOptions = {}) {
     this.now = options.now ?? (() => new Date());
     this.leaseTtlMs = options.leaseTtlMs ?? 5 * 60 * 1000;
     this.defaultWorkspace = options.defaultWorkspace ?? DEFAULT_WORKSPACE;
+    this.sourceHashSecret = options.sourceHashSecret ?? resolveSourceHashSecret().secret;
   }
 
   createTask(input: CreateTaskInput, idempotencyKey: string): CreateTaskResult {
@@ -652,6 +674,110 @@ export class InMemoryControlPlane {
     return { groupProfile: updated };
   }
 
+  ingestSourceEvent(input: {
+    sourceSystem: string;
+    sourceRef: string;
+    eventType: string;
+    platform?: string;
+    occurredAt?: string;
+    payload?: JsonRecord;
+    metadata?: JsonRecord;
+    entryType?: string;
+    externalChatId?: string;
+    externalThreadId?: string;
+    externalMessageId?: string;
+    speakerChannelUserId?: string;
+    groupProfileId?: string;
+    agentMentioned?: boolean;
+    bodyText?: string;
+    entryMetadata?: JsonRecord;
+    retention?: RetentionMetadataInput;
+  }): { sourceEvent: SourceEventRecord; entry: EntryRecord; created: boolean } {
+    const sourceSystem = normalizeSourceSystem(input.sourceSystem);
+    const sourceRef = normalizeSourceRef(input.sourceRef);
+    const sourceHash = createSourceHash({ sourceSystem, sourceRef, secret: this.sourceHashSecret });
+    const existingId = this.sourceEventUnique.get(sourceEventKey(sourceSystem, sourceHash));
+    if (existingId) {
+      const sourceEvent = this.mustGetSourceEvent(existingId);
+      const entry = this.mustGetEntryBySourceEvent(sourceEvent.id);
+      return { sourceEvent, entry, created: false };
+    }
+
+    if (input.speakerChannelUserId) this.mustGetChannelUser(input.speakerChannelUserId);
+    if (input.groupProfileId) this.mustGetGroupProfile(input.groupProfileId);
+
+    const now = this.timestamp();
+    const platform = normalizeIngressPlatform(input.platform);
+    const externalChatId = normalizeExternalRef(input.externalChatId, 'external_chat_id');
+    const externalThreadId = normalizeExternalRef(input.externalThreadId, 'external_thread_id');
+    const externalMessageId = normalizeExternalRef(input.externalMessageId, 'external_message_id');
+    const eventRetention = normalizeRetentionMetadata({ ...input.retention, sourceSystem }, { ...SOURCE_EVENT_RETENTION_DEFAULTS, sourceSystem });
+    const entryRetention = normalizeRetentionMetadata({ ...input.retention, sourceSystem }, { ...ENTRY_RETENTION_DEFAULTS, sourceSystem });
+    const sourceEvent: SourceEventRecord = {
+      id: randomUUID(),
+      sourceSystem,
+      sourceRef,
+      sourceHash,
+      eventType: normalizeEventType(input.eventType),
+      ...(platform ? { platform } : {}),
+      occurredAt: normalizeOccurredAt(input.occurredAt, now),
+      receivedAt: now,
+      payload: input.payload ?? {},
+      metadata: input.metadata ?? {},
+      retentionClass: eventRetention.retentionClass,
+      memorySpace: eventRetention.memorySpace,
+      sensitivity: eventRetention.sensitivity,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const entry: EntryRecord = {
+      id: randomUUID(),
+      sourceEventId: sourceEvent.id,
+      entryType: normalizeEntryType(input.entryType),
+      ...(platform ? { platform } : {}),
+      ...(externalChatId ? { externalChatId } : {}),
+      ...(externalThreadId ? { externalThreadId } : {}),
+      ...(externalMessageId ? { externalMessageId } : {}),
+      ...(input.speakerChannelUserId ? { speakerChannelUserId: input.speakerChannelUserId } : {}),
+      ...(input.groupProfileId ? { groupProfileId: input.groupProfileId } : {}),
+      agentMentioned: input.agentMentioned ?? false,
+      bodyText: normalizeBodyText(input.bodyText),
+      metadata: input.entryMetadata ?? {},
+      retentionClass: entryRetention.retentionClass,
+      memorySpace: entryRetention.memorySpace,
+      sourceSystem: entryRetention.sourceSystem,
+      sensitivity: entryRetention.sensitivity,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.sourceEvents.set(sourceEvent.id, sourceEvent);
+    this.sourceEventUnique.set(sourceEventKey(sourceSystem, sourceHash), sourceEvent.id);
+    this.entries.set(entry.id, entry);
+    this.entryBySourceEvent.set(sourceEvent.id, entry.id);
+    return { sourceEvent, entry, created: true };
+  }
+
+  getSourceEvent(id: string): SourceEventRecord | undefined {
+    return this.sourceEvents.get(id);
+  }
+
+  resolveSourceEvent(input: { sourceSystem: string; sourceRef: string }): SourceEventRecord | undefined {
+    const sourceSystem = normalizeSourceSystem(input.sourceSystem);
+    const sourceRef = normalizeSourceRef(input.sourceRef);
+    const sourceHash = createSourceHash({ sourceSystem, sourceRef, secret: this.sourceHashSecret });
+    const id = this.sourceEventUnique.get(sourceEventKey(sourceSystem, sourceHash));
+    return id ? this.sourceEvents.get(id) : undefined;
+  }
+
+  getEntry(id: string): EntryRecord | undefined {
+    return this.entries.get(id);
+  }
+
+  getEntryBySourceEvent(sourceEventId: string): EntryRecord | undefined {
+    const id = this.entryBySourceEvent.get(sourceEventId);
+    return id ? this.entries.get(id) : undefined;
+  }
+
   revokeDevice(deviceId: string, reason = 'device_revoked'): { device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] } {
     const device = this.mustGetDevice(deviceId);
     if (device.status === 'REVOKED') return { device, tasks: [], runs: [], leases: [] };
@@ -1065,6 +1191,20 @@ export class InMemoryControlPlane {
     return groupProfile;
   }
 
+  private mustGetSourceEvent(sourceEventId: string): SourceEventRecord {
+    const sourceEvent = this.sourceEvents.get(sourceEventId);
+    if (!sourceEvent) throw new AgentlinkError(404, 'AL_SOURCE_EVENT_NOT_FOUND', 'Source event not found');
+    return sourceEvent;
+  }
+
+  private mustGetEntryBySourceEvent(sourceEventId: string): EntryRecord {
+    const entryId = this.entryBySourceEvent.get(sourceEventId);
+    if (!entryId) throw new AgentlinkError(404, 'AL_ENTRY_NOT_FOUND', 'Entry not found');
+    const entry = this.entries.get(entryId);
+    if (!entry) throw new AgentlinkError(404, 'AL_ENTRY_NOT_FOUND', 'Entry not found');
+    return entry;
+  }
+
   private findActiveLease(runId: string): LeaseRecord | undefined {
     return [...this.leases.values()].find((lease) => lease.runId === runId && isActiveLeaseStatus(lease.status));
   }
@@ -1298,6 +1438,10 @@ function platformIdentityKey(platform: string, normalizedExternalId: string): st
 
 function groupProfileKey(platform: string, normalizedExternalGroupId: string): string {
   return `${platform}:${normalizedExternalGroupId}`;
+}
+
+function sourceEventKey(sourceSystem: string, sourceHash: string): string {
+  return `${sourceSystem}:${sourceHash}`;
 }
 
 function normalizeOptionalDisplayName(displayName: string | undefined): string | undefined {

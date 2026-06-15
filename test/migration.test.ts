@@ -179,9 +179,33 @@ test('initial migration gives AL-M1-005 group profile retention boundary columns
   assert.match(sql, /CREATE TABLE al_group_profile[\s\S]*sensitivity al_sensitivity NOT NULL DEFAULT 'internal'/i);
 });
 
-test('initial migration keeps AL-M1-005 out-of-scope entry/session/memory tables absent', () => {
+test('initial migration adds AL-M1-006 source event and entry tables without session/memory scope creep', () => {
   const sql = loadInitialMigration();
-  for (const table of ['al_entry', 'al_source_event', 'al_session', 'al_memory', 'al_memory_bridge']) {
+  assert.match(sql, /CREATE TABLE al_source_event/i);
+  assert.match(sql, /source_hash text NOT NULL CHECK \(source_hash ~ '\^hmac-sha256:v1:\[0-9a-f\]\{64\}\$'\)/i);
+  assert.match(sql, /UNIQUE \(source_system, source_hash\)/i);
+  assert.match(sql, /CREATE TABLE al_entry/i);
+  assert.match(sql, /source_event_id uuid NOT NULL REFERENCES al_source_event\(id\) ON DELETE CASCADE UNIQUE/i);
+  assert.match(sql, /entry_type text NOT NULL DEFAULT 'unknown' CHECK \(entry_type IN \('dm', 'group', 'thread', 'web', 'unknown'\)\)/i);
+  assert.match(sql, /speaker_channel_user_id uuid REFERENCES al_channel_user\(id\)/i);
+  assert.match(sql, /group_profile_id uuid REFERENCES al_group_profile\(id\)/i);
+  assert.match(sql, /CREATE INDEX idx_al_source_event_source_received/i);
+  assert.match(sql, /CREATE INDEX idx_al_entry_platform_chat/i);
+  for (const table of ['al_session', 'al_memory', 'al_memory_bridge']) {
     assert.doesNotMatch(sql, new RegExp(`CREATE TABLE ${table}`, 'i'));
   }
+});
+
+
+test('initial migration gives AL-M1-006 ingress tables short-term retention boundaries', () => {
+  const sql = loadInitialMigration();
+  assert.match(sql, /CREATE TABLE al_source_event[\s\S]*retention_class al_retention_class NOT NULL DEFAULT 'short_term'/i);
+  assert.match(sql, /CREATE TABLE al_source_event[\s\S]*memory_space text NOT NULL DEFAULT 'default' CHECK \(memory_space ~/i);
+  assert.match(sql, /CREATE TABLE al_source_event[\s\S]*sensitivity al_sensitivity NOT NULL DEFAULT 'internal'/i);
+  assert.match(sql, /CREATE TABLE al_entry[\s\S]*retention_class al_retention_class NOT NULL DEFAULT 'short_term'/i);
+  assert.match(sql, /CREATE TABLE al_entry[\s\S]*memory_space text NOT NULL DEFAULT 'default' CHECK \(memory_space ~/i);
+  assert.match(sql, /CREATE TABLE al_entry[\s\S]*source_system text NOT NULL DEFAULT 'agentlink' CHECK \(source_system ~/i);
+  assert.match(sql, /CREATE TABLE al_entry[\s\S]*sensitivity al_sensitivity NOT NULL DEFAULT 'internal'/i);
+  assert.match(sql, /CREATE INDEX idx_al_source_event_retention ON al_source_event\(memory_space, retention_class\)/i);
+  assert.match(sql, /CREATE INDEX idx_al_entry_retention ON al_entry\(memory_space, retention_class\)/i);
 });

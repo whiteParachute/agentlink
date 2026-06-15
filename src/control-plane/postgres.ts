@@ -9,6 +9,7 @@ import { PgRuntime } from '../db/pg-client.js';
 export interface PostgresControlPlaneOptions {
   leaseTtlMs?: number;
   now?: () => Date;
+  sourceHashSecret?: string;
 }
 
 export class PostgresControlPlane implements AgentlinkControlPlanePort {
@@ -120,6 +121,44 @@ export class PostgresControlPlane implements AgentlinkControlPlanePort {
     tone?: string;
   }) {
     return await this.withRepository((repository) => repository.setGroupProfileDefaults(input));
+  }
+
+  async ingestSourceEvent(input: {
+    sourceSystem: string;
+    sourceRef: string;
+    eventType: string;
+    platform?: string;
+    occurredAt?: string;
+    payload?: JsonRecord;
+    metadata?: JsonRecord;
+    entryType?: string;
+    externalChatId?: string;
+    externalThreadId?: string;
+    externalMessageId?: string;
+    speakerChannelUserId?: string;
+    groupProfileId?: string;
+    agentMentioned?: boolean;
+    bodyText?: string;
+    entryMetadata?: JsonRecord;
+    retention?: RetentionMetadataInput;
+  }) {
+    return await this.withRepository((repository) => repository.ingestSourceEvent(input));
+  }
+
+  async getSourceEvent(id: string) {
+    return await this.withRepository((repository) => repository.getSourceEvent(id));
+  }
+
+  async resolveSourceEvent(input: { sourceSystem: string; sourceRef: string }) {
+    return await this.withRepository((repository) => repository.resolveSourceEvent(input));
+  }
+
+  async getEntry(id: string) {
+    return await this.withRepository((repository) => repository.getEntry(id));
+  }
+
+  async getEntryBySourceEvent(sourceEventId: string) {
+    return await this.withRepository((repository) => repository.getEntryBySourceEvent(sourceEventId));
   }
 
   async revokeDevice(deviceId: string, reason?: string) {

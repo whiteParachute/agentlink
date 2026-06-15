@@ -309,6 +309,48 @@ CREATE TABLE al_group_profile (
 );
 
 
+-- AL-M1-006 normalized inbound event and one-entry projection. SourceEvent
+-- source_system/source_hash is the natural key; source_hash is HMAC-only.
+CREATE TABLE al_source_event (
+  id uuid PRIMARY KEY,
+  source_system text NOT NULL CHECK (source_system ~ '^[a-z][a-z0-9._:-]{0,63}$'),
+  source_ref text NOT NULL CHECK (length(btrim(source_ref)) BETWEEN 1 AND 512),
+  source_hash text NOT NULL CHECK (source_hash ~ '^hmac-sha256:v1:[0-9a-f]{64}$'),
+  event_type text NOT NULL CHECK (event_type ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  platform text CHECK (platform IS NULL OR platform ~ '^[a-z][a-z0-9._:-]{0,63}$'),
+  occurred_at timestamptz NOT NULL,
+  received_at timestamptz NOT NULL DEFAULT now(),
+  payload jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(payload) = 'object'),
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
+  retention_class al_retention_class NOT NULL DEFAULT 'short_term',
+  memory_space text NOT NULL DEFAULT 'default' CHECK (memory_space ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  sensitivity al_sensitivity NOT NULL DEFAULT 'internal',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (source_system, source_hash)
+);
+
+CREATE TABLE al_entry (
+  id uuid PRIMARY KEY,
+  source_event_id uuid NOT NULL REFERENCES al_source_event(id) ON DELETE CASCADE UNIQUE,
+  entry_type text NOT NULL DEFAULT 'unknown' CHECK (entry_type IN ('dm', 'group', 'thread', 'web', 'unknown')),
+  platform text CHECK (platform IS NULL OR platform ~ '^[a-z][a-z0-9._:-]{0,63}$'),
+  external_chat_id text CHECK (external_chat_id IS NULL OR length(btrim(external_chat_id)) BETWEEN 1 AND 512),
+  external_thread_id text CHECK (external_thread_id IS NULL OR length(btrim(external_thread_id)) BETWEEN 1 AND 512),
+  external_message_id text CHECK (external_message_id IS NULL OR length(btrim(external_message_id)) BETWEEN 1 AND 512),
+  speaker_channel_user_id uuid REFERENCES al_channel_user(id),
+  group_profile_id uuid REFERENCES al_group_profile(id),
+  agent_mentioned boolean NOT NULL DEFAULT false,
+  body_text text NOT NULL DEFAULT '',
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
+  retention_class al_retention_class NOT NULL DEFAULT 'short_term',
+  memory_space text NOT NULL DEFAULT 'default' CHECK (memory_space ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  source_system text NOT NULL DEFAULT 'agentlink' CHECK (source_system ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  sensitivity al_sensitivity NOT NULL DEFAULT 'internal',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE INDEX idx_al_task_domain_status_created ON al_task(domain, status, created_at DESC);
 CREATE UNIQUE INDEX uq_al_run_task_attempt ON al_run(task_id, attempt_no);
 CREATE INDEX idx_al_run_task ON al_run(task_id);
@@ -331,6 +373,13 @@ CREATE INDEX idx_al_channel_user_category ON al_channel_user(category);
 CREATE INDEX idx_al_platform_identity_channel_user ON al_platform_identity(channel_user_id);
 CREATE INDEX idx_al_group_profile_group_type ON al_group_profile(group_type);
 CREATE INDEX idx_al_group_profile_retention ON al_group_profile(memory_space, retention_class);
+CREATE INDEX idx_al_source_event_source_received ON al_source_event(source_system, received_at DESC);
+CREATE INDEX idx_al_source_event_retention ON al_source_event(memory_space, retention_class);
+CREATE INDEX idx_al_entry_source_event ON al_entry(source_event_id);
+CREATE INDEX idx_al_entry_platform_chat ON al_entry(platform, external_chat_id);
+CREATE INDEX idx_al_entry_group_profile ON al_entry(group_profile_id);
+CREATE INDEX idx_al_entry_speaker ON al_entry(speaker_channel_user_id);
+CREATE INDEX idx_al_entry_retention ON al_entry(memory_space, retention_class);
 
 -- AL-M1-002 retention lookup indexes: support querying long-lived objects by
 -- their retention boundary (memory_space + retention_class) per domain.

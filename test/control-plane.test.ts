@@ -766,3 +766,68 @@ test('group profile get, resolve, and default updates work with validation', () 
     (error) => error instanceof AgentlinkError && error.code === 'AL_GROUP_PROFILE_NOT_FOUND',
   );
 });
+
+test('source event ingest creates one SourceEvent/Entry and repeats idempotently by source hash', () => {
+  const controlPlane = new InMemoryControlPlane({ now: () => new Date('2026-06-15T00:00:00.000Z'), sourceHashSecret: 'test-secret' });
+  const speaker = controlPlane.upsertChannelUser({ platform: 'feishu', externalId: 'ou_1' });
+  const group = controlPlane.upsertGroupProfile({ platform: 'feishu', externalGroupId: 'oc_1' });
+  const first = controlPlane.ingestSourceEvent({
+    sourceSystem: ' FeiShu ',
+    sourceRef: ' msg-1 ',
+    eventType: 'message.receive',
+    platform: 'Feishu',
+    occurredAt: '2026-06-14T23:59:00.000Z',
+    payload: { raw: true },
+    metadata: { trace: 't1' },
+    entryType: 'group',
+    externalChatId: ' oc_1 ',
+    externalThreadId: ' thread_1 ',
+    externalMessageId: ' msg_1 ',
+    speakerChannelUserId: speaker.channelUser.id,
+    groupProfileId: group.groupProfile.id,
+    agentMentioned: true,
+    bodyText: 'hello',
+    entryMetadata: { parsed: true },
+  });
+  assert.equal(first.created, true);
+  assert.equal(first.sourceEvent.sourceSystem, 'feishu');
+  assert.equal(first.sourceEvent.sourceRef, 'msg-1');
+  assert.match(first.sourceEvent.sourceHash, /^hmac-sha256:v1:[0-9a-f]{64}$/);
+  assert.equal(first.sourceEvent.retentionClass, 'short_term');
+  assert.equal(first.sourceEvent.memorySpace, 'default');
+  assert.equal(first.entry.sourceSystem, 'feishu');
+  assert.equal(first.entry.entryType, 'group');
+  assert.equal(first.entry.externalChatId, 'oc_1');
+  assert.equal(first.entry.speakerChannelUserId, speaker.channelUser.id);
+  assert.equal(first.entry.groupProfileId, group.groupProfile.id);
+  assert.equal(first.entry.agentMentioned, true);
+
+  const replay = controlPlane.ingestSourceEvent({ sourceSystem: 'feishu', sourceRef: 'msg-1', eventType: 'message.receive', bodyText: 'ignored' });
+  assert.equal(replay.created, false);
+  assert.equal(replay.sourceEvent.id, first.sourceEvent.id);
+  assert.equal(replay.entry.id, first.entry.id);
+  assert.equal(replay.entry.bodyText, 'hello');
+
+  assert.equal(controlPlane.resolveSourceEvent({ sourceSystem: 'Feishu', sourceRef: ' msg-1 ' })?.id, first.sourceEvent.id);
+  assert.equal(controlPlane.getSourceEvent(first.sourceEvent.id)?.id, first.sourceEvent.id);
+  assert.equal(controlPlane.getEntry(first.entry.id)?.id, first.entry.id);
+  assert.equal(controlPlane.getEntryBySourceEvent(first.sourceEvent.id)?.id, first.entry.id);
+});
+
+test('source event ingest keeps source_system/source_ref boundaries and rejects missing optional refs', () => {
+  const controlPlane = new InMemoryControlPlane({ sourceHashSecret: 'test-secret' });
+  const a = controlPlane.ingestSourceEvent({ sourceSystem: 'feishu', sourceRef: 'same', eventType: 'message', bodyText: 'a' });
+  const b = controlPlane.ingestSourceEvent({ sourceSystem: 'telegram', sourceRef: 'same', eventType: 'message', bodyText: 'b' });
+  const c = controlPlane.ingestSourceEvent({ sourceSystem: 'feishu', sourceRef: 'Same', eventType: 'message', bodyText: 'c' });
+  assert.notEqual(b.sourceEvent.id, a.sourceEvent.id);
+  assert.notEqual(c.sourceEvent.id, a.sourceEvent.id);
+
+  assert.throws(
+    () => controlPlane.ingestSourceEvent({ sourceSystem: 'feishu', sourceRef: 'missing-user', eventType: 'message', speakerChannelUserId: 'missing' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_CHANNEL_USER_NOT_FOUND',
+  );
+  assert.throws(
+    () => controlPlane.ingestSourceEvent({ sourceSystem: 'feishu', sourceRef: 'missing-group', eventType: 'message', groupProfileId: 'missing' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_GROUP_PROFILE_NOT_FOUND',
+  );
+});

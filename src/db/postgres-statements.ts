@@ -1241,6 +1241,119 @@ SELECT row_to_json(gp) AS group_profile
 FROM updated gp;
 `,
 
+  findSourceEventById: `
+SELECT row_to_json(se) AS source_event
+FROM al_source_event se
+WHERE se.id = $1;
+`,
+
+  findSourceEventByNaturalKey: `
+SELECT row_to_json(se) AS source_event
+FROM al_source_event se
+WHERE se.source_system = $1
+  AND se.source_hash = $2;
+`,
+
+  findEntryById: `
+SELECT row_to_json(e) AS entry
+FROM al_entry e
+WHERE e.id = $1;
+`,
+
+  findEntryBySourceEventId: `
+SELECT row_to_json(e) AS entry
+FROM al_entry e
+WHERE e.source_event_id = $1;
+`,
+
+  insertSourceEvent: `
+WITH inserted AS (
+  INSERT INTO al_source_event (
+    id,
+    source_system,
+    source_ref,
+    source_hash,
+    event_type,
+    platform,
+    occurred_at,
+    received_at,
+    payload,
+    metadata,
+    retention_class,
+    memory_space,
+    sensitivity,
+    created_at,
+    updated_at
+  ) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $9::jsonb,
+    $10::jsonb,
+    $11::al_retention_class,
+    $12,
+    $13::al_sensitivity,
+    $14,
+    $14
+  )
+  RETURNING *
+)
+SELECT row_to_json(se) AS source_event
+FROM inserted se;
+`,
+
+  insertEntry: `
+WITH inserted AS (
+  INSERT INTO al_entry (
+    id,
+    source_event_id,
+    entry_type,
+    platform,
+    external_chat_id,
+    external_thread_id,
+    external_message_id,
+    speaker_channel_user_id,
+    group_profile_id,
+    agent_mentioned,
+    body_text,
+    metadata,
+    retention_class,
+    memory_space,
+    source_system,
+    sensitivity,
+    created_at,
+    updated_at
+  ) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $9,
+    $10,
+    $11,
+    $12::jsonb,
+    $13::al_retention_class,
+    $14,
+    $15,
+    $16::al_sensitivity,
+    $17,
+    $17
+  )
+  RETURNING *
+)
+SELECT row_to_json(e) AS entry
+FROM inserted e;
+`,
+
   updateGroupProfileDefaults: `
 WITH updated AS (
   UPDATE al_group_profile

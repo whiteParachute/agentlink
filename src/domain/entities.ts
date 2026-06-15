@@ -285,3 +285,44 @@ export interface GroupContextProjection {
   memoryScope: string;
   tone: string;
 }
+
+export interface SourceEventRecord {
+  id: string;
+  sourceSystem: string;
+  sourceRef: string;
+  sourceHash: string;
+  eventType: string;
+  platform?: string;
+  occurredAt: string;
+  receivedAt: string;
+  payload: JsonRecord;
+  metadata: JsonRecord;
+  retentionClass: RetentionClass;
+  memorySpace: string;
+  sensitivity: Sensitivity;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type EntryType = 'dm' | 'group' | 'thread' | 'web' | 'unknown';
+
+export interface EntryRecord {
+  id: string;
+  sourceEventId: string;
+  entryType: EntryType;
+  platform?: string;
+  externalChatId?: string;
+  externalThreadId?: string;
+  externalMessageId?: string;
+  speakerChannelUserId?: string;
+  groupProfileId?: string;
+  agentMentioned: boolean;
+  bodyText: string;
+  metadata: JsonRecord;
+  retentionClass: RetentionClass;
+  memorySpace: string;
+  sourceSystem: string;
+  sensitivity: Sensitivity;
+  createdAt: string;
+  updatedAt: string;
+}

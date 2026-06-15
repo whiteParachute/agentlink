@@ -14,6 +14,8 @@ import {
   CHANNEL_USER_RETENTION_DEFAULTS,
   PLATFORM_IDENTITY_RETENTION_DEFAULTS,
   GROUP_PROFILE_RETENTION_DEFAULTS,
+  SOURCE_EVENT_RETENTION_DEFAULTS,
+  ENTRY_RETENTION_DEFAULTS,
   isRetentionClass,
   isSensitivity,
   isRetentionIdentifier,
@@ -233,4 +235,14 @@ void test('normalizeRetentionMetadata with MAIN_USER defaults produces consisten
   assert.deepEqual(a, b);
   assert.equal(a.retentionClass, 'operational');
   assert.equal(a.memorySpace, 'default');
+});
+
+
+void test('AL-M1-006 ingress retention defaults use short_term/default/agentlink/internal before source override', () => {
+  for (const d of [SOURCE_EVENT_RETENTION_DEFAULTS, ENTRY_RETENTION_DEFAULTS]) {
+    assert.equal(d.retentionClass, 'short_term');
+    assert.equal(d.memorySpace, 'default');
+    assert.equal(d.sourceSystem, 'agentlink');
+    assert.equal(d.sensitivity, 'internal');
+  }
 });

@@ -31,3 +31,30 @@ test('loadConfig reads PostgreSQL runtime settings from env', () => {
 test('loadConfig rejects unknown storage modes', () => {
   assert.throws(() => loadConfig({ AGENTLINK_STORAGE: 'sqlite' }), /Invalid AGENTLINK_STORAGE/);
 });
+
+
+test('loadConfig fails fast in production without source hash secret', () => {
+  assert.throws(
+    () => loadConfig({ NODE_ENV: 'production', AGENTLINK_INGRESS_BEARER_TOKEN: 'ingress-token' }),
+    /AGENTLINK_SOURCE_HASH_SECRET is required/,
+  );
+});
+
+test('loadConfig fails fast in production without ingress bearer token', () => {
+  assert.throws(
+    () => loadConfig({ NODE_ENV: 'production', AGENTLINK_SOURCE_HASH_SECRET: 'source-secret' }),
+    /AGENTLINK_INGRESS_BEARER_TOKEN is required/,
+  );
+});
+
+test('loadConfig accepts production when source hash secret and ingress bearer token are configured', () => {
+  const config = loadConfig({
+    NODE_ENV: 'production',
+    AGENTLINK_SOURCE_HASH_SECRET: 'source-secret',
+    AGENTLINK_INGRESS_BEARER_TOKEN: 'ingress-token',
+  });
+  assert.equal(config.environment, 'production');
+  assert.equal(config.sourceHashSecret, 'source-secret');
+  assert.equal(config.sourceHashSecretConfigured, true);
+  assert.equal(config.ingressBearerToken, 'ingress-token');
+});

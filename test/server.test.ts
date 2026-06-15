@@ -2,11 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
 import { DEFAULT_WORKSPACE } from '../src/control-plane/in-memory.js';
-import { createAgentlinkServer, createAgentlinkServerFromConfig } from '../src/server.js';
+import { createAgentlinkServer, createAgentlinkServerFromConfig, type AgentlinkServerOptions } from '../src/server.js';
 
 
-async function withServer(run: (baseUrl: string) => Promise<void>): Promise<void> {
-  const server = createAgentlinkServer({ name: 'agentlink-test', version: '0.1.0-test', environment: 'test' });
+async function withServer(run: (baseUrl: string) => Promise<void>, options: AgentlinkServerOptions = {}): Promise<void> {
+  const server = createAgentlinkServer({ name: 'agentlink-test', version: '0.1.0-test', environment: 'test' }, options);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   const address = server.address();
   assert.equal(typeof address, 'object');
@@ -1220,4 +1220,135 @@ test('HTTP group profile upsert does not merge different platform or external_gr
     assert.equal(invalid.status, 400);
     assert.equal(((await invalid.json()) as { error: { code: string } }).error.code, 'AL_BAD_REQUEST');
   });
+});
+
+test('HTTP ingress event creates/replays SourceEvent and exposes source-event/entry reads', async () => {
+  await withServer(async (baseUrl) => {
+    const channel = await postJson(baseUrl, '/api/v1/channel-users/upsert', { platform: 'feishu', external_id: 'ou_1' });
+    const channelBody = (await channel.json()) as { channel_user: { id: string } };
+    const group = await postJson(baseUrl, '/api/v1/group-profiles', { platform: 'feishu', external_group_id: 'oc_1' });
+    const groupBody = (await group.json()) as { group_profile: { id: string } };
+
+    const first = await postJson(baseUrl, '/api/v1/ingress/events', {
+      source_system: ' Feishu ',
+      source_ref: ' msg-1 ',
+      event_type: 'message.receive',
+      platform: 'Feishu',
+      occurred_at: '2026-06-15T00:00:00.000Z',
+      payload: { raw: true },
+      metadata: { trace: 't1' },
+      entry_type: 'group',
+      external_chat_id: 'oc_1',
+      external_thread_id: 'thread_1',
+      external_message_id: 'msg_1',
+      speaker_channel_user_id: channelBody.channel_user.id,
+      group_profile_id: groupBody.group_profile.id,
+      agent_mentioned: true,
+      body_text: 'hello',
+      entry_metadata: { parsed: true },
+    });
+    assert.equal(first.status, 201);
+    const firstBody = (await first.json()) as {
+      created: boolean;
+      source_event: { id: string; source_system: string; source_ref: string; source_hash: string; retention: Record<string, string>; sourceSystem?: string };
+      entry: { id: string; source_event_id: string; entry_type: string; body_text: string; speaker_channel_user_id: string; group_profile_id: string; sourceEventId?: string };
+    };
+    assert.equal(firstBody.created, true);
+    assert.equal(firstBody.source_event.source_system, 'feishu');
+    assert.equal(firstBody.source_event.source_ref, 'msg-1');
+    assert.match(firstBody.source_event.source_hash, /^hmac-sha256:v1:[0-9a-f]{64}$/);
+    assert.equal(firstBody.source_event.retention.retention_class, 'short_term');
+    assert.equal(firstBody.source_event.retention.source_system, 'feishu');
+    assert.equal(firstBody.source_event.sourceSystem, undefined);
+    assert.equal(firstBody.entry.source_event_id, firstBody.source_event.id);
+    assert.equal(firstBody.entry.entry_type, 'group');
+    assert.equal(firstBody.entry.speaker_channel_user_id, channelBody.channel_user.id);
+    assert.equal(firstBody.entry.group_profile_id, groupBody.group_profile.id);
+    assert.equal(firstBody.entry.sourceEventId, undefined);
+
+    const replay = await postJson(baseUrl, '/api/v1/ingress/events', { source_system: 'feishu', source_ref: 'msg-1', event_type: 'message.receive', body_text: 'ignored' });
+    assert.equal(replay.status, 200);
+    const replayBody = (await replay.json()) as typeof firstBody;
+    assert.equal(replayBody.created, false);
+    assert.equal(replayBody.source_event.id, firstBody.source_event.id);
+    assert.equal(replayBody.entry.id, firstBody.entry.id);
+
+    const resolved = await fetch(`${baseUrl}/api/v1/source-events/resolve?source_system=Feishu&source_ref=msg-1`);
+    assert.equal(resolved.status, 200);
+    assert.equal(((await resolved.json()) as { source_event: { id: string } }).source_event.id, firstBody.source_event.id);
+
+    const gotEvent = await fetch(`${baseUrl}/api/v1/source-events/${firstBody.source_event.id}`);
+    assert.equal(gotEvent.status, 200);
+    const gotEntry = await fetch(`${baseUrl}/api/v1/entries/${firstBody.entry.id}`);
+    assert.equal(gotEntry.status, 200);
+    const gotEntryByEvent = await fetch(`${baseUrl}/api/v1/source-events/${firstBody.source_event.id}/entry`);
+    assert.equal(gotEntryByEvent.status, 200);
+  });
+});
+
+test('HTTP ingress event covers validation and optional reference 404s', async () => {
+  await withServer(async (baseUrl) => {
+    const bad = await postJson(baseUrl, '/api/v1/ingress/events', { source_system: 'bad source', source_ref: 'msg', event_type: 'message' });
+    assert.equal(bad.status, 400);
+    assert.equal(((await bad.json()) as { error: { code: string } }).error.code, 'AL_BAD_REQUEST');
+
+    const missingUser = await postJson(baseUrl, '/api/v1/ingress/events', {
+      source_system: 'feishu',
+      source_ref: 'missing-user',
+      event_type: 'message',
+      speaker_channel_user_id: '00000000-0000-4000-8000-000000000404',
+    });
+    assert.equal(missingUser.status, 404);
+    assert.equal(((await missingUser.json()) as { error: { code: string } }).error.code, 'AL_CHANNEL_USER_NOT_FOUND');
+
+    const missingGroup = await postJson(baseUrl, '/api/v1/ingress/events', {
+      source_system: 'feishu',
+      source_ref: 'missing-group',
+      event_type: 'message',
+      group_profile_id: '00000000-0000-4000-8000-000000000405',
+    });
+    assert.equal(missingGroup.status, 404);
+    assert.equal(((await missingGroup.json()) as { error: { code: string } }).error.code, 'AL_GROUP_PROFILE_NOT_FOUND');
+
+    const missingEvent = await fetch(`${baseUrl}/api/v1/source-events/00000000-0000-4000-8000-000000000404`);
+    assert.equal(missingEvent.status, 404);
+    assert.equal(((await missingEvent.json()) as { error: { code: string } }).error.code, 'AL_SOURCE_EVENT_NOT_FOUND');
+    const missingEntry = await fetch(`${baseUrl}/api/v1/entries/00000000-0000-4000-8000-000000000404`);
+    assert.equal(missingEntry.status, 404);
+    assert.equal(((await missingEntry.json()) as { error: { code: string } }).error.code, 'AL_ENTRY_NOT_FOUND');
+  });
+});
+
+
+test('HTTP ingress endpoints require configured bearer token and allow valid token', async () => {
+  const auth = { authorization: 'Bearer ingress-test-token' };
+  await withServer(async (baseUrl) => {
+    const payload = { source_system: 'feishu', source_ref: 'auth-msg-1', event_type: 'message.receive', body_text: 'hello' };
+
+    const missingToken = await postJson(baseUrl, '/api/v1/ingress/events', payload);
+    assert.equal(missingToken.status, 401);
+    assert.equal(((await missingToken.json()) as { error: { code: string } }).error.code, 'AL_AUTH_REQUIRED');
+
+    const wrongToken = await postJson(baseUrl, '/api/v1/ingress/events', payload, { authorization: 'Bearer wrong' });
+    assert.equal(wrongToken.status, 403);
+    assert.equal(((await wrongToken.json()) as { error: { code: string } }).error.code, 'AL_FORBIDDEN');
+
+    const created = await postJson(baseUrl, '/api/v1/ingress/events', payload, auth);
+    assert.equal(created.status, 201);
+    const createdBody = (await created.json()) as { source_event: { id: string }; entry: { id: string } };
+
+    const resolveMissingToken = await fetch(`${baseUrl}/api/v1/source-events/resolve?source_system=feishu&source_ref=auth-msg-1`);
+    assert.equal(resolveMissingToken.status, 401);
+
+    const resolved = await fetch(`${baseUrl}/api/v1/source-events/resolve?source_system=feishu&source_ref=auth-msg-1`, { headers: auth });
+    assert.equal(resolved.status, 200);
+    assert.equal(((await resolved.json()) as { source_event: { id: string } }).source_event.id, createdBody.source_event.id);
+
+    const gotEvent = await fetch(`${baseUrl}/api/v1/source-events/${createdBody.source_event.id}`, { headers: auth });
+    assert.equal(gotEvent.status, 200);
+    const gotEntryByEvent = await fetch(`${baseUrl}/api/v1/source-events/${createdBody.source_event.id}/entry`, { headers: auth });
+    assert.equal(gotEntryByEvent.status, 200);
+    const gotEntry = await fetch(`${baseUrl}/api/v1/entries/${createdBody.entry.id}`, { headers: auth });
+    assert.equal(gotEntry.status, 200);
+  }, { ingressBearerToken: 'ingress-test-token' });
 });

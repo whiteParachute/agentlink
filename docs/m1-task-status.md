@@ -225,3 +225,26 @@ See `docs/m1-control-plane-reuse-boundary.md` for the per-object classification,
 - PostgreSQL upsert is transaction-based and uses explicit `row_to_json(gp) AS group_profile` envelopes. Unique-race insert failures are recovered by rolling back, re-reading the existing group profile, and applying the same update path.
 - Test count: 223. Tests cover domain normalization, retention defaults, migration invariant / boundary checks, in-memory upsert/replay/no-merge/get/resolve/defaults behavior, PostgreSQL statement envelopes, repository create/update/unique-race/get/resolve/defaults behavior, and HTTP 201/200/400/404 snake_case flows.
 - Remaining risks: no live PostgreSQL DSN smoke was run in this environment; real concurrent unique-race behavior is covered by repository-scripted tests only. Entry, SourceEvent, Session, Memory, MemoryBridge, work/personal interop, historical import, complex permissions, multiple MainUsers, tenants, real platform adapters, frontend UI, group membership, raw message saving, recent summary, context package builder, and memory query/write remain intentionally out of scope.
+
+## 2026-06-15 AL-M1-006 Entry / SourceEvent ingress model update
+
+- Added the AL-M1-006 inbound normalization model: `SourceEventRecord` persists the source-system/source-ref natural key, versioned `hmac-sha256:v1:*` source hash, event metadata, payload, timestamps, and short-term retention boundary; `EntryRecord` stores the one-entry projection linked by `sourceEventId`.
+- Added `src/domain/ingress.ts` normalization helpers for `source_system`, `source_ref`, `event_type`, `entry_type`, optional external chat/thread/message refs, body text, platform, and timestamps.
+- Added `src/domain/source-hash.ts`; `source_hash` is generated with Node HMAC-SHA256 and a versioned prefix. `AGENTLINK_SOURCE_HASH_SECRET` is the production configuration knob. Test/dev mode has a deterministic fallback so local smoke tests remain reproducible; production deployments should set the env var explicitly.
+- Added `SOURCE_EVENT_RETENTION_DEFAULTS` and `ENTRY_RETENTION_DEFAULTS` as `short_term / default / agentlink / internal`. Ingest forces the effective retention source system to the normalized inbound `source_system`.
+- Updated `migrations/0001_initial.sql` with `al_source_event` and `al_entry`, including HMAC-format CHECK, `UNIQUE(source_system, source_hash)`, one-entry-per-source-event guard, optional FKs to existing `al_channel_user` and `al_group_profile`, and lookup/retention indexes.
+- Wired the model through the control-plane port, in-memory implementation, PostgreSQL statements/repository, PostgreSQL adapter, and HTTP API:
+  - `POST /api/v1/ingress/events`
+  - `GET /api/v1/source-events/{id}`
+  - `GET /api/v1/source-events/resolve?source_system=...&source_ref=...`
+  - `GET /api/v1/entries/{id}`
+  - `GET /api/v1/source-events/{id}/entry`
+- Ingest semantics are intentionally minimal: same `(source_system, source_hash)` returns the existing SourceEvent + Entry with `created=false`; different source system or source ref creates a separate event. Optional `speaker_channel_user_id` and `group_profile_id` must already exist and are never auto-created.
+- PostgreSQL ingest is transaction-based. It first looks up the HMAC natural key, inserts SourceEvent + Entry on first create, and recovers unique-race insert failures by rolling back and re-reading the durable SourceEvent/Entry rows.
+- Tests added/updated for source hash HMAC behavior, ingress normalization, in-memory ingest/replay/reference boundaries, migration invariants, PostgreSQL statement envelopes, repository create/replay/unique-race/reference-not-found behavior, and HTTP 201/200/400/404 snake_case flows.
+- Remaining risks: no live PostgreSQL DSN smoke was run in this environment unless `AGENTLINK_DATABASE_URL` is provided; real concurrent unique-race behavior is covered by scripted repository tests only. Session, large/small session, Memory, MemoryBridge, task routing, response gateway, AL-M1-007 Fake IM adapter, real Feishu/Telegram/QQ webhooks, frontend UI, group membership, speaker classification, reply-mode resolution, historical import, multiple MainUsers, tenants, and complex permissions remain intentionally out of scope.
+
+### AL-M1-006 security deployment note
+
+- Production startup now fails fast unless both `AGENTLINK_SOURCE_HASH_SECRET` and `AGENTLINK_INGRESS_BEARER_TOKEN` are configured.
+- The new ingress/source-event/entry endpoints must not be exposed publicly without the bearer token. Local test/dev can run without a configured token only for non-production smoke usage.

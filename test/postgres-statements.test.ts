@@ -356,3 +356,20 @@ test('group profile update statements preserve repository-controlled defaults an
   assert.match(PostgreSqlStatements.updateGroupProfileDefaults, /tone = COALESCE\(\$5, tone\)/i);
   assert.match(PostgreSqlStatements.updateGroupProfileDefaults, /WHERE id = \$1/i);
 });
+
+test('AL-M1-006 source event and entry statements use envelopes and HMAC natural key', () => {
+  assert.match(PostgreSqlStatements.findSourceEventByNaturalKey, /WHERE se\.source_system = \$1/i);
+  assert.match(PostgreSqlStatements.findSourceEventByNaturalKey, /AND se\.source_hash = \$2/i);
+  assert.match(PostgreSqlStatements.findSourceEventByNaturalKey, /row_to_json\(se\) AS source_event/i);
+  assert.match(PostgreSqlStatements.insertSourceEvent, /INSERT INTO al_source_event/i);
+  assert.match(PostgreSqlStatements.insertSourceEvent, /source_hash/i);
+  assert.match(PostgreSqlStatements.insertSourceEvent, /\$11::al_retention_class/i);
+  assert.match(PostgreSqlStatements.insertSourceEvent, /row_to_json\(se\) AS source_event/i);
+  assert.match(PostgreSqlStatements.insertEntry, /INSERT INTO al_entry/i);
+  assert.match(PostgreSqlStatements.insertEntry, /source_event_id/i);
+  assert.match(PostgreSqlStatements.insertEntry, /speaker_channel_user_id/i);
+  assert.match(PostgreSqlStatements.insertEntry, /group_profile_id/i);
+  assert.match(PostgreSqlStatements.insertEntry, /\$13::al_retention_class/i);
+  assert.match(PostgreSqlStatements.insertEntry, /row_to_json\(e\) AS entry/i);
+  assert.match(PostgreSqlStatements.findEntryBySourceEventId, /WHERE e\.source_event_id = \$1/i);
+});

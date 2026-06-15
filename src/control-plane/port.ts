@@ -3,6 +3,7 @@ import type {
   ChannelUserRecord,
   ControlActionRecord,
   DeviceRecord,
+  EntryRecord,
   GroupProfileRecord,
   LeaseRecord,
   MainUserRecord,
@@ -11,6 +12,7 @@ import type {
   RecoverableRunRecord,
   RunEventRecord,
   RunRecord,
+  SourceEventRecord,
   TaskRecord,
   WorkdirAccessMode,
   WorkdirGrantRecord,
@@ -99,4 +101,27 @@ export interface AgentlinkControlPlanePort {
     memoryScope?: string;
     tone?: string;
   }): MaybePromise<{ groupProfile: GroupProfileRecord }>;
+  ingestSourceEvent(input: {
+    sourceSystem: string;
+    sourceRef: string;
+    eventType: string;
+    platform?: string;
+    occurredAt?: string;
+    payload?: Record<string, unknown>;
+    metadata?: Record<string, unknown>;
+    entryType?: string;
+    externalChatId?: string;
+    externalThreadId?: string;
+    externalMessageId?: string;
+    speakerChannelUserId?: string;
+    groupProfileId?: string;
+    agentMentioned?: boolean;
+    bodyText?: string;
+    entryMetadata?: Record<string, unknown>;
+    retention?: RetentionMetadataInput;
+  }): MaybePromise<{ sourceEvent: SourceEventRecord; entry: EntryRecord; created: boolean }>;
+  getSourceEvent(id: string): MaybePromise<SourceEventRecord | undefined>;
+  resolveSourceEvent(input: { sourceSystem: string; sourceRef: string }): MaybePromise<SourceEventRecord | undefined>;
+  getEntry(id: string): MaybePromise<EntryRecord | undefined>;
+  getEntryBySourceEvent(sourceEventId: string): MaybePromise<EntryRecord | undefined>;
 }

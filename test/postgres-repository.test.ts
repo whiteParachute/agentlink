@@ -1222,3 +1222,140 @@ test('postgres repository get, resolve, set defaults, and not-found behavior for
     (error) => error instanceof AgentlinkError && error.code === 'AL_GROUP_PROFILE_NOT_FOUND',
   );
 });
+
+function sourceEventRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: '00000000-0000-4000-8000-000000001001',
+    source_system: 'feishu',
+    source_ref: 'msg-1',
+    source_hash: 'hmac-sha256:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    event_type: 'message.receive',
+    platform: 'feishu',
+    occurred_at: NOW,
+    received_at: NOW,
+    payload: { raw: true },
+    metadata: { trace: 't1' },
+    retention_class: 'short_term',
+    memory_space: 'default',
+    sensitivity: 'internal',
+    created_at: NOW,
+    updated_at: NOW,
+    ...overrides,
+  };
+}
+
+function entryRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: '00000000-0000-4000-8000-000000001101',
+    source_event_id: '00000000-0000-4000-8000-000000001001',
+    entry_type: 'group',
+    platform: 'feishu',
+    external_chat_id: 'oc_1',
+    external_thread_id: 'thread_1',
+    external_message_id: 'msg_1',
+    speaker_channel_user_id: null,
+    group_profile_id: null,
+    agent_mentioned: true,
+    body_text: 'hello',
+    metadata: { parsed: true },
+    retention_class: 'short_term',
+    memory_space: 'default',
+    source_system: 'feishu',
+    sensitivity: 'internal',
+    created_at: NOW,
+    updated_at: NOW,
+    ...overrides,
+  };
+}
+
+test('PostgreSqlRepository ingests source event and entry in one transaction', async () => {
+  const client = new ScriptedSqlClient();
+  client.enqueue(none());
+  client.enqueue(one({ source_event: sourceEventRow() }));
+  client.enqueue(one({ entry: entryRow() }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW), sourceHashSecret: 'test-secret' });
+
+  const result = await repo.ingestSourceEvent({
+    sourceSystem: ' Feishu ',
+    sourceRef: ' msg-1 ',
+    eventType: 'message.receive',
+    platform: 'Feishu',
+    payload: { raw: true },
+    metadata: { trace: 't1' },
+    entryType: 'group',
+    externalChatId: 'oc_1',
+    externalThreadId: 'thread_1',
+    externalMessageId: 'msg_1',
+    agentMentioned: true,
+    bodyText: 'hello',
+    entryMetadata: { parsed: true },
+  });
+
+  assert.equal(result.created, true);
+  assert.equal(result.sourceEvent.sourceSystem, 'feishu');
+  assert.equal(result.entry.sourceEventId, result.sourceEvent.id);
+  assert.deepEqual(client.calls.map((call) => call.sql), [
+    'BEGIN',
+    PostgreSqlStatements.findSourceEventByNaturalKey,
+    PostgreSqlStatements.insertSourceEvent,
+    PostgreSqlStatements.insertEntry,
+    'COMMIT',
+  ]);
+  const insertSourceParams = client.calls[2]?.params ?? [];
+  assert.equal(insertSourceParams[1], 'feishu');
+  assert.equal(insertSourceParams[2], 'msg-1');
+  assert.match(String(insertSourceParams[3]), /^hmac-sha256:v1:[0-9a-f]{64}$/);
+  assert.equal(insertSourceParams[10], 'short_term');
+  const insertEntryParams = client.calls[3]?.params ?? [];
+  assert.equal(insertEntryParams[2], 'group');
+  assert.equal(insertEntryParams[14], 'feishu');
+});
+
+test('PostgreSqlRepository returns existing source event and entry on duplicate natural key', async () => {
+  const client = new ScriptedSqlClient();
+  client.enqueue(one({ source_event: sourceEventRow() }));
+  client.enqueue(one({ entry: entryRow() }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW), sourceHashSecret: 'test-secret' });
+
+  const result = await repo.ingestSourceEvent({ sourceSystem: 'feishu', sourceRef: 'msg-1', eventType: 'message.receive', bodyText: 'ignored' });
+
+  assert.equal(result.created, false);
+  assert.equal(result.sourceEvent.id, '00000000-0000-4000-8000-000000001001');
+  assert.equal(result.entry.id, '00000000-0000-4000-8000-000000001101');
+  assert.deepEqual(client.calls.map((call) => call.sql), ['BEGIN', PostgreSqlStatements.findSourceEventByNaturalKey, PostgreSqlStatements.findEntryBySourceEventId, 'COMMIT']);
+});
+
+test('PostgreSqlRepository recovers from source event unique race by re-reading durable rows', async () => {
+  const client = new ScriptedSqlClient();
+  const uniqueViolation = Object.assign(new Error('duplicate'), { code: '23505' });
+  client.enqueue(none());
+  client.enqueue(uniqueViolation);
+  client.enqueue(one({ source_event: sourceEventRow() }));
+  client.enqueue(one({ entry: entryRow() }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW), sourceHashSecret: 'test-secret' });
+
+  const result = await repo.ingestSourceEvent({ sourceSystem: 'feishu', sourceRef: 'msg-1', eventType: 'message.receive' });
+
+  assert.equal(result.created, false);
+  assert.deepEqual(client.calls.map((call) => call.sql), [
+    'BEGIN',
+    PostgreSqlStatements.findSourceEventByNaturalKey,
+    PostgreSqlStatements.insertSourceEvent,
+    'ROLLBACK',
+    PostgreSqlStatements.findSourceEventByNaturalKey,
+    PostgreSqlStatements.findEntryBySourceEventId,
+  ]);
+});
+
+test('PostgreSqlRepository rejects missing optional speaker reference without auto-creating ChannelUser', async () => {
+  const client = new ScriptedSqlClient();
+  client.enqueue(none());
+  client.enqueue(none());
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW), sourceHashSecret: 'test-secret' });
+
+  await assert.rejects(
+    () => repo.ingestSourceEvent({ sourceSystem: 'feishu', sourceRef: 'missing-user', eventType: 'message.receive', speakerChannelUserId: 'missing' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_CHANNEL_USER_NOT_FOUND',
+  );
+  assert.deepEqual(client.calls.map((call) => call.sql), ['BEGIN', PostgreSqlStatements.findSourceEventByNaturalKey, PostgreSqlStatements.findChannelUserById, 'ROLLBACK']);
+});
