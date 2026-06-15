@@ -68,6 +68,7 @@ test('health, ready, and meta endpoints return service metadata', async () => {
     assert.equal(body.capabilities.includes('session-api'), true);
     assert.equal(body.capabilities.includes('memory-candidate-api'), true);
     assert.equal(body.capabilities.includes('memory-api'), true);
+    assert.equal(body.capabilities.includes('main-agent-outlet-api'), true);
   });
 });
 
@@ -1707,6 +1708,65 @@ test('HTTP session resolve maps thread entries to small sessions without changin
     assert.equal(body.entry.session_id, body.small_session.id);
     assert.equal(body.session.id, body.small_session.id);
   }, { ingressBearerToken: 'session-thread-token' });
+});
+
+
+test('HTTP entry route-task endpoint requires bearer and creates an idempotent main-agent task', async () => {
+  await withServer(async (baseUrl) => {
+    const auth = { authorization: 'Bearer route-token' };
+    const fake = await postJson(baseUrl, '/api/v1/fake-im/events', { kind: 'dm', message_id: 'route-msg-1', text: 'raw body must not enter task' }, auth);
+    assert.equal(fake.status, 201);
+    const fakeBody = (await fake.json()) as { source_event: { id: string }; entry: { id: string; session_id?: string | null } };
+    assert.equal(fakeBody.entry.session_id, undefined);
+
+    const missingToken = await postJson(baseUrl, `/api/v1/entries/${fakeBody.entry.id}/route-task`, {});
+    assert.equal(missingToken.status, 401);
+    const wrongToken = await postJson(baseUrl, `/api/v1/entries/${fakeBody.entry.id}/route-task`, {}, { authorization: 'Bearer wrong' });
+    assert.equal(wrongToken.status, 403);
+
+    const unresolved = await postJson(baseUrl, `/api/v1/entries/${fakeBody.entry.id}/route-task`, {}, auth);
+    assert.equal(unresolved.status, 400);
+    assert.equal(((await unresolved.json()) as { error: { code: string } }).error.code, 'AL_BAD_REQUEST');
+
+    const resolved = await postJson(baseUrl, '/api/v1/sessions/resolve', { entry_id: fakeBody.entry.id }, auth);
+    assert.equal(resolved.status, 201);
+    const resolvedBody = (await resolved.json()) as { session: { id: string }; entry: { id: string; session_id: string } };
+
+    const routed = await postJson(baseUrl, `/api/v1/entries/${fakeBody.entry.id}/route-task`, {}, auth);
+    assert.equal(routed.status, 201);
+    const routedBody = (await routed.json()) as { created: boolean; task: Record<string, unknown>; run: Record<string, unknown>; entry: Record<string, unknown> };
+    assert.equal(routedBody.created, true);
+    assert.equal(routedBody.task.source, 'main-agent');
+    assert.equal(routedBody.task.source_ref, fakeBody.entry.id);
+    assert.equal(routedBody.task.current_run_id, routedBody.run.id);
+    assert.equal(routedBody.entry.id, fakeBody.entry.id);
+    assert.equal(routedBody.entry.session_id, resolvedBody.session.id);
+    const payload = routedBody.task.payload as Record<string, unknown>;
+    assert.equal(payload.entry_id, fakeBody.entry.id);
+    assert.equal(payload.session_id, resolvedBody.session.id);
+    assert.equal(payload.source_event_id, fakeBody.source_event.id);
+    assert.deepEqual(payload.memory_candidate_ids, []);
+    assert.deepEqual(payload.memory_ids, []);
+    assert.equal((payload.reply_mode as Record<string, unknown>).reply_mode, 'dialog');
+    assert.equal(JSON.stringify(payload).includes('raw body must not enter task'), false);
+    assert.equal(JSON.stringify(routedBody.task.task_spec).includes('raw body must not enter task'), false);
+    assert.equal(payload.body_text, undefined);
+
+    const replay = await postJson(baseUrl, `/api/v1/entries/${fakeBody.entry.id}/route-task`, {}, auth);
+    assert.equal(replay.status, 200);
+    const replayBody = (await replay.json()) as { created: boolean; task: { id: string }; run: { id: string } };
+    assert.equal(replayBody.created, false);
+    assert.equal(replayBody.task.id, routedBody.task.id);
+    assert.equal(replayBody.run.id, routedBody.run.id);
+
+    const bareEntry = await fetch(`${baseUrl}/api/v1/entries/${fakeBody.entry.id}`, { headers: auth });
+    assert.equal(bareEntry.status, 200);
+    assert.equal(((await bareEntry.json()) as { entry: { id: string } }).entry.id, fakeBody.entry.id);
+
+    const missing = await postJson(baseUrl, '/api/v1/entries/missing-entry/route-task', {}, auth);
+    assert.equal(missing.status, 404);
+    assert.equal(((await missing.json()) as { error: { code: string } }).error.code, 'AL_ENTRY_NOT_FOUND');
+  }, { ingressBearerToken: 'route-token' });
 });
 
 test('HTTP fake IM endpoint rejects invalid input and missing optional references', async () => {

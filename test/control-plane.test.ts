@@ -901,6 +901,52 @@ test('session resolve creates large plus small for thread and does not create sm
   assert.equal(lookup?.session.id, threadResolved.smallSession.id);
 });
 
+
+test('main agent route creates one task for a resolved entry and never stores raw body text', () => {
+  const controlPlane = new InMemoryControlPlane({ now: () => new Date('2026-06-15T00:00:00.000Z') });
+  const ingested = controlPlane.ingestSourceEvent({
+    sourceSystem: 'fake-im',
+    sourceRef: 'route-task:dm:1',
+    eventType: 'message.receive',
+    platform: 'fake-im',
+    entryType: 'dm',
+    externalMessageId: 'route-msg-1',
+    bodyText: 'raw task prompt must stay out',
+  });
+  const unresolved = controlPlane.routeEntryToTask;
+  assert.throws(
+    () => unresolved.call(controlPlane, { entryId: ingested.entry.id }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_BAD_REQUEST',
+  );
+
+  const resolved = controlPlane.resolveSession({ entryId: ingested.entry.id });
+  const first = controlPlane.routeEntryToTask({ entryId: ingested.entry.id });
+  assert.equal(first.created, true);
+  assert.equal(first.entry.sessionId, resolved.session.id);
+  assert.equal(first.task.source, 'main-agent');
+  assert.equal(first.task.sourceRef, ingested.entry.id);
+  assert.equal(first.task.idempotencyKey, `entry-route:${ingested.entry.id}`);
+  assert.equal(first.task.payload.entry_id, ingested.entry.id);
+  assert.equal(first.task.payload.session_id, resolved.session.id);
+  assert.equal(first.task.payload.source_event_id, ingested.sourceEvent.id);
+  assert.equal((first.task.payload.reply_mode as Record<string, unknown>).reply_mode, 'dialog');
+  assert.deepEqual(first.task.payload.memory_candidate_ids, []);
+  assert.deepEqual(first.task.payload.memory_ids, []);
+  assert.equal(JSON.stringify(first.task.payload).includes('raw task prompt must stay out'), false);
+  assert.equal(JSON.stringify(first.task.taskSpec).includes('raw task prompt must stay out'), false);
+  assert.equal(first.run.taskId, first.task.id);
+
+  const replay = controlPlane.routeEntryToTask({ entryId: ingested.entry.id });
+  assert.equal(replay.created, false);
+  assert.equal(replay.task.id, first.task.id);
+  assert.equal(replay.run.id, first.run.id);
+
+  assert.throws(
+    () => controlPlane.routeEntryToTask({ entryId: 'missing-entry' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_ENTRY_NOT_FOUND',
+  );
+});
+
 test('memory candidate create is explicit, idempotent per session, and status-reviewable', () => {
   const controlPlane = new InMemoryControlPlane({ now: () => new Date('2026-06-11T00:00:00.000Z') });
   const ingested = controlPlane.ingestSourceEvent({

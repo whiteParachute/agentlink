@@ -76,6 +76,7 @@ import {
   normalizeConfidence,
 } from '../domain/memory-candidate.js';
 import { normalizeBridgeStatus, normalizeMemoryText } from '../domain/memory.js';
+import { buildMainAgentRouteTask } from '../domain/main-agent.js';
 import { planSessionForEntry, type SessionDraft } from '../domain/session.js';
 import { decideRetry } from '../domain/retry.js';
 import { hashStable, stableStringify } from '../domain/signature.js';
@@ -1032,6 +1033,19 @@ export class PostgreSqlRepository {
 
   async getEntryBySourceEvent(sourceEventId: string): Promise<EntryRecord | undefined> {
     return await this.findEntryBySourceEventId(this.client, sourceEventId);
+  }
+
+  async routeEntryToTask(input: { entryId: string }): Promise<{ task: TaskRecord; run: RunRecord; entry: EntryRecord; created: boolean }> {
+    const entry = await this.getEntry(input.entryId);
+    if (!entry) throw new AgentlinkError(404, 'AL_ENTRY_NOT_FOUND', 'Entry not found');
+    if (!entry.sessionId) throw new AgentlinkError(400, 'AL_BAD_REQUEST', 'Entry must be resolved to a session before routing');
+    const session = await this.getSession(entry.sessionId);
+    if (!session) throw new AgentlinkError(400, 'AL_BAD_REQUEST', 'Entry session_id does not resolve to a session');
+    const groupProfile = entry.groupProfileId ? await this.getGroupProfile(entry.groupProfileId) : undefined;
+    if (entry.groupProfileId && !groupProfile) throw new AgentlinkError(404, 'AL_GROUP_PROFILE_NOT_FOUND', 'Group profile not found');
+    const route = buildMainAgentRouteTask({ entry, session, ...(groupProfile ? { groupProfile } : {}) });
+    const result = await this.createTaskWithInitialRun(route.taskInput, route.idempotencyKey);
+    return { task: result.task, run: result.run, entry, created: result.created };
   }
 
   async resolveSession(input: { entryId: string; retention?: RetentionMetadataInput }): Promise<{ largeSession: SessionRecord; smallSession?: SessionRecord; session: SessionRecord; entry: EntryRecord; created: boolean }> {

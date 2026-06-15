@@ -161,6 +161,10 @@ export class PostgresControlPlane implements AgentlinkControlPlanePort {
     return await this.withRepository((repository) => repository.getEntryBySourceEvent(sourceEventId));
   }
 
+  async routeEntryToTask(input: { entryId: string }) {
+    return await this.withRepository((repository) => repository.routeEntryToTask(input));
+  }
+
   async resolveSession(input: { entryId: string; retention?: RetentionMetadataInput }) {
     return await this.withRepository((repository) => repository.resolveSession(input));
   }

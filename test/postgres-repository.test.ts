@@ -2,10 +2,12 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { AgentlinkError } from '../src/control-plane/errors.js';
 import { PostgreSqlRepository, createTaskIdempotencySignature } from '../src/db/postgres-repository.js';
+import { buildMainAgentRouteTask } from '../src/domain/main-agent.js';
 import { PostgreSqlStatements } from '../src/db/postgres-statements.js';
 import { hashStable } from '../src/domain/signature.js';
 import { TASK_RETENTION_DEFAULTS, MAIN_USER_RETENTION_DEFAULTS, RetentionMetadataError, normalizeRetentionMetadata } from '../src/domain/retention.js';
 import type { SqlClient, SqlQueryResult } from '../src/db/transaction.js';
+import type { EntryRecord, SessionRecord } from '../src/domain/entities.js';
 
 const NOW = '2026-06-11T00:00:00.000Z';
 
@@ -1495,6 +1497,125 @@ function memoryCandidateRow(overrides: Record<string, unknown> = {}): Record<str
     ...overrides,
   };
 }
+
+
+test('PostgreSqlRepository routes a resolved entry to an idempotent main-agent task without raw body', async () => {
+  const session = sessionRow();
+  const entry = entryRow({ session_id: session.id, body_text: 'raw body must not be copied' });
+  const entryRecord: EntryRecord = {
+    id: entry.id as string,
+    sourceEventId: entry.source_event_id as string,
+    entryType: entry.entry_type as EntryRecord['entryType'],
+    platform: entry.platform as string,
+    externalChatId: entry.external_chat_id as string,
+    externalThreadId: entry.external_thread_id as string,
+    externalMessageId: entry.external_message_id as string,
+    sessionId: session.id as string,
+    agentMentioned: entry.agent_mentioned as boolean,
+    bodyText: entry.body_text as string,
+    metadata: entry.metadata as Record<string, unknown>,
+    retentionClass: entry.retention_class as EntryRecord['retentionClass'],
+    memorySpace: entry.memory_space as string,
+    sourceSystem: entry.source_system as string,
+    sensitivity: entry.sensitivity as EntryRecord['sensitivity'],
+    createdAt: entry.created_at as string,
+    updatedAt: entry.updated_at as string,
+  };
+  const sessionRecord: SessionRecord = {
+    id: session.id as string,
+    sessionScope: session.session_scope as SessionRecord['sessionScope'],
+    platform: session.platform as string,
+    externalChatId: session.external_chat_id as string,
+    naturalKey: session.natural_key as string,
+    displayName: session.display_name as string,
+    metadata: session.metadata as Record<string, unknown>,
+    retentionClass: session.retention_class as SessionRecord['retentionClass'],
+    memorySpace: session.memory_space as string,
+    sourceSystem: session.source_system as string,
+    sensitivity: session.sensitivity as SessionRecord['sensitivity'],
+    createdAt: session.created_at as string,
+    updatedAt: session.updated_at as string,
+  };
+  const draft = buildMainAgentRouteTask({ entry: entryRecord, session: sessionRecord });
+  const signature = createTaskIdempotencySignature('personal', draft.taskInput, normalizeRetentionMetadata(undefined, TASK_RETENTION_DEFAULTS));
+  const task = taskRow({
+    source: 'main-agent',
+    source_ref: entry.id,
+    payload: draft.taskInput.payload,
+    task_spec: draft.taskInput.taskSpec,
+    idempotency_key: draft.idempotencyKey,
+    idempotency_signature: signature,
+  });
+
+  const client = new ScriptedSqlClient();
+  client.enqueue(one({ entry }));
+  client.enqueue(one({ session }));
+  client.enqueue(none());
+  client.enqueue(one({ task, run: runRow({ task_id: task.id, id: task.current_run_id }) }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+  const result = await repo.routeEntryToTask({ entryId: entry.id as string });
+
+  assert.equal(result.created, true);
+  assert.equal(result.task.source, 'main-agent');
+  assert.equal(result.task.sourceRef, entry.id);
+  assert.equal(result.entry.id, entry.id);
+  assert.equal(JSON.stringify(result.task.payload).includes('raw body must not be copied'), false);
+  assert.deepEqual(client.calls.map((call) => call.sql), [
+    PostgreSqlStatements.findEntryById,
+    PostgreSqlStatements.findSessionById,
+    'BEGIN',
+    PostgreSqlStatements.findTaskByIdempotencyKey,
+    PostgreSqlStatements.createTaskWithInitialRun,
+    'COMMIT',
+  ]);
+  assert.equal(client.calls[4]?.params?.[2], 'main-agent');
+  assert.equal(client.calls[4]?.params?.[3], entry.id);
+  assert.equal(client.calls[4]?.params?.[7], `entry-route:${entry.id}`);
+  assert.equal(String(client.calls[4]?.params?.[4]).includes('raw body must not be copied'), false);
+
+  const replayClient = new ScriptedSqlClient();
+  replayClient.enqueue(one({ entry }));
+  replayClient.enqueue(one({ session }));
+  replayClient.enqueue(one({ task, run: runRow({ task_id: task.id, id: task.current_run_id }) }));
+  const replayRepo = new PostgreSqlRepository(replayClient, { now: () => new Date(NOW) });
+  const replay = await replayRepo.routeEntryToTask({ entryId: entry.id as string });
+  assert.equal(replay.created, false);
+  assert.equal(replay.task.id, task.id);
+  assert.deepEqual(replayClient.calls.map((call) => call.sql), [
+    PostgreSqlStatements.findEntryById,
+    PostgreSqlStatements.findSessionById,
+    'BEGIN',
+    PostgreSqlStatements.findTaskByIdempotencyKey,
+    'COMMIT',
+  ]);
+});
+
+test('PostgreSqlRepository routeEntryToTask rejects missing or unresolved entries', async () => {
+  const missingClient = new ScriptedSqlClient();
+  missingClient.enqueue(none());
+  const missingRepo = new PostgreSqlRepository(missingClient, { now: () => new Date(NOW) });
+  await assert.rejects(
+    () => missingRepo.routeEntryToTask({ entryId: 'missing-entry' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_ENTRY_NOT_FOUND',
+  );
+
+  const unresolvedClient = new ScriptedSqlClient();
+  unresolvedClient.enqueue(one({ entry: entryRow({ session_id: null }) }));
+  const unresolvedRepo = new PostgreSqlRepository(unresolvedClient, { now: () => new Date(NOW) });
+  await assert.rejects(
+    () => unresolvedRepo.routeEntryToTask({ entryId: '00000000-0000-4000-8000-000000001101' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_BAD_REQUEST',
+  );
+
+  const missingSessionClient = new ScriptedSqlClient();
+  missingSessionClient.enqueue(one({ entry: entryRow({ session_id: '00000000-0000-4000-8000-000000001201' }) }));
+  missingSessionClient.enqueue(none());
+  const missingSessionRepo = new PostgreSqlRepository(missingSessionClient, { now: () => new Date(NOW) });
+  await assert.rejects(
+    () => missingSessionRepo.routeEntryToTask({ entryId: '00000000-0000-4000-8000-000000001101' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_BAD_REQUEST',
+  );
+});
 
 test('PostgreSqlRepository creates memory candidate with referenced session and row_to_json envelope', async () => {
   const client = new ScriptedSqlClient();

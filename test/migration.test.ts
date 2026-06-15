@@ -288,3 +288,11 @@ test('initial migration gives AL-M1-012 finalized memories memory retention boun
   assert.match(sql, /CREATE TABLE al_memory \([\s\S]*source_system text NOT NULL DEFAULT 'agentlink' CHECK \(source_system ~/i);
   assert.match(sql, /CREATE TABLE al_memory \([\s\S]*sensitivity al_sensitivity NOT NULL DEFAULT 'internal'/i);
 });
+
+test('initial migration has no AL-M1-013 main-agent outlet schema additions', () => {
+  const sql = loadInitialMigration();
+  assert.doesNotMatch(sql, /CREATE TABLE al_main_agent/i);
+  assert.doesNotMatch(sql, /CREATE TABLE al_entry_route/i);
+  assert.doesNotMatch(sql, /CREATE TABLE al_memory_bridge\s*\(/i);
+  assert.doesNotMatch(sql, /main_agent_id/i);
+});

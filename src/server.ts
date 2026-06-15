@@ -123,6 +123,7 @@ async function handleRequest(
         'session-api',
         'memory-candidate-api',
         'memory-api',
+        'main-agent-outlet-api',
       ],
     });
     return;
@@ -461,6 +462,19 @@ async function handleRequest(
     const memoryCandidate = await controlPlane.getMemoryCandidate(memoryCandidateGetMatch[1] ?? '');
     if (!memoryCandidate) throw new AgentlinkError(404, 'AL_MEMORY_CANDIDATE_NOT_FOUND', 'Memory candidate not found');
     sendJson(res, 200, { memory_candidate: toMemoryCandidateDto(memoryCandidate) });
+    return;
+  }
+
+  const entryRouteTaskMatch = /^\/api\/v1\/entries\/([^/]+)\/route-task$/.exec(url.pathname);
+  if (req.method === 'POST' && entryRouteTaskMatch) {
+    requireIngressBearer(req, security);
+    const result = await controlPlane.routeEntryToTask({ entryId: entryRouteTaskMatch[1] ?? '' });
+    sendJson(res, result.created ? 201 : 200, {
+      task: toTaskDto(result.task),
+      run: toRunDto(result.run),
+      entry: toEntryDto(result.entry),
+      created: result.created,
+    });
     return;
   }
 

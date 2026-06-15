@@ -80,6 +80,7 @@ import {
   normalizeConfidence,
 } from '../domain/memory-candidate.js';
 import { normalizeBridgeStatus, normalizeMemoryText } from '../domain/memory.js';
+import { buildMainAgentRouteTask } from '../domain/main-agent.js';
 import { planSessionForEntry, type SessionDraft } from '../domain/session.js';
 import { decideRetry } from '../domain/retry.js';
 import { hashStable, stableStringify } from '../domain/signature.js';
@@ -798,6 +799,18 @@ export class InMemoryControlPlane {
   getEntryBySourceEvent(sourceEventId: string): EntryRecord | undefined {
     const id = this.entryBySourceEvent.get(sourceEventId);
     return id ? this.entries.get(id) : undefined;
+  }
+
+  routeEntryToTask(input: { entryId: string }): { task: TaskRecord; run: RunRecord; entry: EntryRecord; created: boolean } {
+    const entry = this.entries.get(input.entryId);
+    if (!entry) throw new AgentlinkError(404, 'AL_ENTRY_NOT_FOUND', 'Entry not found');
+    if (!entry.sessionId) throw new AgentlinkError(400, 'AL_BAD_REQUEST', 'Entry must be resolved to a session before routing');
+    const session = this.sessions.get(entry.sessionId);
+    if (!session) throw new AgentlinkError(400, 'AL_BAD_REQUEST', 'Entry session_id does not resolve to a session');
+    const groupProfile = entry.groupProfileId ? this.mustGetGroupProfile(entry.groupProfileId) : undefined;
+    const route = buildMainAgentRouteTask({ entry, session, ...(groupProfile ? { groupProfile } : {}) });
+    const result = this.createTask(route.taskInput, route.idempotencyKey);
+    return { task: result.task, run: result.run, entry, created: result.created };
   }
 
   resolveSession(input: { entryId: string; retention?: RetentionMetadataInput }): { largeSession: SessionRecord; smallSession?: SessionRecord; session: SessionRecord; entry: EntryRecord; created: boolean } {
