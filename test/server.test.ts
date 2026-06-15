@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { AgentlinkControlPlanePort } from '../src/control-plane/port.js';
 import { DEFAULT_WORKSPACE } from '../src/control-plane/in-memory.js';
 import { createAgentlinkServer, createAgentlinkServerFromConfig, type AgentlinkServerOptions } from '../src/server.js';
@@ -22,6 +24,11 @@ async function withServer(run: (baseUrl: string) => Promise<void>, options: Agen
 
 async function closeServer(server: Server): Promise<void> {
   await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+}
+
+
+function loadFeishuFixture(name: 'dm' | 'group' | 'thread-reply'): Record<string, unknown> {
+  return JSON.parse(readFileSync(join(process.cwd(), 'test', 'fixtures', 'feishu', `${name}.json`), 'utf8')) as Record<string, unknown>;
 }
 
 async function postJson(baseUrl: string, path: string, body: unknown, headers: Record<string, string> = {}): Promise<Response> {
@@ -55,6 +62,7 @@ test('health, ready, and meta endpoints return service metadata', async () => {
     const body = (await meta.json()) as { m1Scope: string; capabilities: string[] };
     assert.equal(body.m1Scope, 'personal:telegram-agentlink-claw-tenc-codex');
     assert.equal(body.capabilities.includes('agentlet-pull'), true);
+    assert.equal(body.capabilities.includes('feishu-sample-api'), true);
   });
 });
 
@@ -1504,4 +1512,122 @@ test('HTTP fake IM endpoint rejects invalid input and missing optional reference
     assert.equal(missingGroup.status, 404);
     assert.equal(((await missingGroup.json()) as { error: { code: string } }).error.code, 'AL_GROUP_PROFILE_NOT_FOUND');
   }, { ingressBearerToken: 'fake-im-token' });
+});
+
+
+test('HTTP Feishu sample endpoint requires ingress bearer and maps dm/group/thread fixtures', async () => {
+  const auth = { authorization: 'Bearer feishu-sample-token' };
+  await withServer(async (baseUrl) => {
+    const dmPayload = loadFeishuFixture('dm');
+    const missingToken = await postJson(baseUrl, '/api/v1/feishu-sample/events', dmPayload);
+    assert.equal(missingToken.status, 401);
+    assert.equal(((await missingToken.json()) as { error: { code: string } }).error.code, 'AL_AUTH_REQUIRED');
+
+    const wrongToken = await postJson(baseUrl, '/api/v1/feishu-sample/events', dmPayload, { authorization: 'Bearer wrong' });
+    assert.equal(wrongToken.status, 403);
+    assert.equal(((await wrongToken.json()) as { error: { code: string } }).error.code, 'AL_FORBIDDEN');
+
+    const dm = await postJson(baseUrl, '/api/v1/feishu-sample/events', dmPayload, auth);
+    assert.equal(dm.status, 201);
+    const dmBody = (await dm.json()) as {
+      created: boolean;
+      feishu_event: { kind: string; message_id: string; source_ref: string; messageId?: string };
+      source_event: { id: string; source_system: string; platform: string; event_type: string; source_ref: string; payload: { feishu_event: { event: { message: { message_id: string } } } } };
+      entry: { id: string; source_event_id: string; entry_type: string; external_chat_id: string; external_thread_id?: string; external_message_id: string; body_text: string; agent_mentioned: boolean };
+      task?: unknown;
+    };
+    assert.equal(dmBody.created, true);
+    assert.equal(dmBody.feishu_event.kind, 'dm');
+    assert.equal(dmBody.feishu_event.message_id, 'om_feishu_dm_001');
+    assert.equal(dmBody.feishu_event.messageId, undefined);
+    assert.equal(dmBody.source_event.source_system, 'feishu');
+    assert.equal(dmBody.source_event.platform, 'feishu');
+    assert.equal(dmBody.source_event.event_type, 'im.message.receive_v1');
+    assert.equal(dmBody.source_event.source_ref, 'feishu:dm:oc_feishu_p2p_001:none:om_feishu_dm_001');
+    assert.equal(dmBody.source_event.payload.feishu_event.event.message.message_id, 'om_feishu_dm_001');
+    assert.equal(dmBody.entry.entry_type, 'dm');
+    assert.equal(dmBody.entry.external_chat_id, 'oc_feishu_p2p_001');
+    assert.equal(dmBody.entry.external_thread_id, undefined);
+    assert.equal(dmBody.entry.external_message_id, 'om_feishu_dm_001');
+    assert.equal(dmBody.entry.body_text, 'hello from feishu dm');
+    assert.equal(dmBody.entry.agent_mentioned, false);
+    assert.equal(dmBody.task, undefined);
+
+    const replayPayload = loadFeishuFixture('dm');
+    (((replayPayload.event as Record<string, unknown>).message as Record<string, unknown>).content) = JSON.stringify({ text: 'ignored replay text' });
+    const replay = await postJson(baseUrl, '/api/v1/feishu-sample/events', replayPayload, auth);
+    assert.equal(replay.status, 200);
+    const replayBody = (await replay.json()) as typeof dmBody;
+    assert.equal(replayBody.created, false);
+    assert.equal(replayBody.source_event.id, dmBody.source_event.id);
+    assert.equal(replayBody.entry.id, dmBody.entry.id);
+    assert.equal(replayBody.entry.body_text, 'hello from feishu dm');
+
+    const group = await postJson(baseUrl, '/api/v1/feishu-sample/events', loadFeishuFixture('group'), auth);
+    assert.equal(group.status, 201);
+    const groupBody = (await group.json()) as { source_event: { source_ref: string }; entry: { entry_type: string; external_chat_id: string; external_message_id: string; body_text: string; agent_mentioned: boolean } };
+    assert.equal(groupBody.source_event.source_ref, 'feishu:group:oc_feishu_group_001:none:om_feishu_group_001');
+    assert.equal(groupBody.entry.entry_type, 'group');
+    assert.equal(groupBody.entry.external_chat_id, 'oc_feishu_group_001');
+    assert.equal(groupBody.entry.external_message_id, 'om_feishu_group_001');
+    assert.match(groupBody.entry.body_text, /Agentlink/);
+    assert.equal(groupBody.entry.agent_mentioned, true);
+
+    const thread = await postJson(baseUrl, '/api/v1/feishu-sample/events', loadFeishuFixture('thread-reply'), auth);
+    assert.equal(thread.status, 201);
+    const threadBody = (await thread.json()) as { feishu_event: { parent_id: string; thread_id: string }; source_event: { id: string; source_ref: string; metadata: { fixture?: string; feishu: { root_id: string; parent_id: string; reply_to_message_id: string } } }; entry: { id: string; entry_type: string; external_chat_id: string; external_thread_id: string; external_message_id: string; body_text: string; agent_mentioned: boolean } };
+    assert.equal(threadBody.feishu_event.parent_id, 'om_feishu_parent_001');
+    assert.equal(threadBody.feishu_event.thread_id, 'om_feishu_thread_root_001');
+    assert.equal(threadBody.source_event.source_ref, 'feishu:thread:oc_feishu_group_001:om_feishu_thread_root_001:om_feishu_thread_reply_001');
+    assert.equal(threadBody.source_event.metadata.fixture, 'thread-reply');
+    assert.equal(threadBody.source_event.metadata.feishu.root_id, 'om_feishu_thread_root_001');
+    assert.equal(threadBody.source_event.metadata.feishu.parent_id, 'om_feishu_parent_001');
+    assert.equal(threadBody.source_event.metadata.feishu.reply_to_message_id, 'om_feishu_parent_001');
+    assert.equal(threadBody.entry.entry_type, 'thread');
+    assert.equal(threadBody.entry.external_chat_id, 'oc_feishu_group_001');
+    assert.equal(threadBody.entry.external_thread_id, 'om_feishu_thread_root_001');
+    assert.equal(threadBody.entry.external_message_id, 'om_feishu_thread_reply_001');
+    assert.equal(threadBody.entry.body_text, 'reply in feishu thread');
+    assert.equal(threadBody.entry.agent_mentioned, false);
+
+    const resolved = await fetch(`${baseUrl}/api/v1/source-events/resolve?source_system=feishu&source_ref=${encodeURIComponent('feishu:thread:oc_feishu_group_001:om_feishu_thread_root_001:om_feishu_thread_reply_001')}`, { headers: auth });
+    assert.equal(resolved.status, 200);
+    assert.equal(((await resolved.json()) as { source_event: { id: string } }).source_event.id, threadBody.source_event.id);
+  }, { ingressBearerToken: 'feishu-sample-token' });
+});
+
+test('HTTP Feishu sample endpoint rejects invalid sample payloads', async () => {
+  const auth = { authorization: 'Bearer feishu-sample-token' };
+  await withServer(async (baseUrl) => {
+    const invalidPayloads: Record<string, unknown>[] = [];
+    const missingMessage = loadFeishuFixture('dm');
+    delete (((missingMessage.event as Record<string, unknown>).message as Record<string, unknown>).message_id);
+    invalidPayloads.push(missingMessage);
+
+    const missingChat = loadFeishuFixture('dm');
+    delete (((missingChat.event as Record<string, unknown>).message as Record<string, unknown>).chat_id);
+    invalidPayloads.push(missingChat);
+
+    const missingThreadRoot = loadFeishuFixture('thread-reply');
+    (((missingThreadRoot.event as Record<string, unknown>).message as Record<string, unknown>).root_id) = '';
+    invalidPayloads.push(missingThreadRoot);
+
+    const unsupportedType = loadFeishuFixture('dm');
+    (((unsupportedType.event as Record<string, unknown>).message as Record<string, unknown>).message_type) = 'image';
+    invalidPayloads.push(unsupportedType);
+
+    const invalidContent = loadFeishuFixture('dm');
+    (((invalidContent.event as Record<string, unknown>).message as Record<string, unknown>).content) = '{bad json';
+    invalidPayloads.push(invalidContent);
+
+    const nonObjectMetadata = loadFeishuFixture('dm');
+    nonObjectMetadata.metadata = [];
+    invalidPayloads.push(nonObjectMetadata);
+
+    for (const payload of invalidPayloads) {
+      const response = await postJson(baseUrl, '/api/v1/feishu-sample/events', payload, auth);
+      assert.equal(response.status, 400);
+      assert.equal(((await response.json()) as { error: { code: string } }).error.code, 'AL_BAD_REQUEST');
+    }
+  }, { ingressBearerToken: 'feishu-sample-token' });
 });

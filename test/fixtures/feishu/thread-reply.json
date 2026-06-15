@@ -1,0 +1,30 @@
+{
+  "schema": "2.0",
+  "header": {
+    "event_id": "evt-feishu-thread-001",
+    "event_type": "im.message.receive_v1",
+    "create_time": "1781514120000",
+    "tenant_key": "tenant_fake"
+  },
+  "event": {
+    "sender": {
+      "sender_id": {
+        "open_id": "ou_fake_sender_thread"
+      },
+      "sender_type": "user",
+      "tenant_key": "tenant_fake"
+    },
+    "message": {
+      "message_id": "om_feishu_thread_reply_001",
+      "chat_id": "oc_feishu_group_001",
+      "chat_type": "group",
+      "root_id": "om_feishu_thread_root_001",
+      "parent_id": "om_feishu_parent_001",
+      "message_type": "text",
+      "content": "{\"text\":\"reply in feishu thread\"}"
+    }
+  },
+  "metadata": {
+    "fixture": "thread-reply"
+  }
+}
