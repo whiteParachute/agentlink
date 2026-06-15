@@ -15,6 +15,7 @@ import {
   PLATFORM_IDENTITY_RETENTION_DEFAULTS,
   GROUP_PROFILE_RETENTION_DEFAULTS,
   SESSION_RETENTION_DEFAULTS,
+  MEMORY_CANDIDATE_RETENTION_DEFAULTS,
   SOURCE_EVENT_RETENTION_DEFAULTS,
   ENTRY_RETENTION_DEFAULTS,
   isRetentionClass,
@@ -225,6 +226,14 @@ void test('AL-M1-004/005/010 identity, group, and session retention defaults use
     assert.equal(d.sourceSystem, 'agentlink');
     assert.equal(d.sensitivity, 'internal');
   }
+});
+
+void test('AL-M1-011 memory candidate retention defaults use memory_candidate/default/agentlink/internal', () => {
+  const d = MEMORY_CANDIDATE_RETENTION_DEFAULTS;
+  assert.equal(d.retentionClass, 'memory_candidate');
+  assert.equal(d.memorySpace, 'default');
+  assert.equal(d.sourceSystem, 'agentlink');
+  assert.equal(d.sensitivity, 'internal');
 });
 
 void test('normalizeRetentionMetadata with MAIN_USER defaults produces consistent output', () => {

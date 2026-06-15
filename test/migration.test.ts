@@ -191,9 +191,8 @@ test('initial migration adds AL-M1-006 source event and entry tables without mem
   assert.match(sql, /group_profile_id uuid REFERENCES al_group_profile\(id\)/i);
   assert.match(sql, /CREATE INDEX idx_al_source_event_source_received/i);
   assert.match(sql, /CREATE INDEX idx_al_entry_platform_chat/i);
-  for (const table of ['al_memory', 'al_memory_bridge']) {
-    assert.doesNotMatch(sql, new RegExp(`CREATE TABLE ${table}`, 'i'));
-  }
+  assert.doesNotMatch(sql, /CREATE TABLE al_memory\s*\(/i);
+  assert.doesNotMatch(sql, /CREATE TABLE al_memory_bridge\s*\(/i);
 });
 
 
@@ -226,8 +225,8 @@ test('initial migration adds AL-M1-010 session table without MainUser or tenant 
   assert.doesNotMatch(sessionTableSql, /main_user_id/i);
   assert.doesNotMatch(sessionTableSql, /singleton_key/i);
   assert.doesNotMatch(sessionTableSql, /tenant/i);
-  assert.doesNotMatch(sql, /CREATE TABLE al_memory/i);
-  assert.doesNotMatch(sql, /CREATE TABLE al_memory_bridge/i);
+  assert.doesNotMatch(sql, /CREATE TABLE al_memory\s*\(/i);
+  assert.doesNotMatch(sql, /CREATE TABLE al_memory_bridge\s*\(/i);
   assert.doesNotMatch(sql, /0002/i);
 });
 
@@ -238,4 +237,30 @@ test('initial migration gives AL-M1-010 sessions operational retention boundarie
   assert.match(sql, /CREATE TABLE al_session[\s\S]*source_system text NOT NULL DEFAULT 'agentlink' CHECK \(source_system ~/i);
   assert.match(sql, /CREATE TABLE al_session[\s\S]*sensitivity al_sensitivity NOT NULL DEFAULT 'internal'/i);
   assert.match(sql, /CREATE INDEX idx_al_session_retention ON al_session\(memory_space, retention_class\)/i);
+});
+
+test('initial migration adds AL-M1-011 memory candidate table without finalized memory tables', () => {
+  const sql = loadInitialMigration();
+  assert.match(sql, /CREATE TABLE al_memory_candidate/i);
+  assert.match(sql, /session_id uuid NOT NULL REFERENCES al_session\(id\) ON DELETE CASCADE/i);
+  assert.match(sql, /entry_id uuid REFERENCES al_entry\(id\) ON DELETE SET NULL/i);
+  assert.match(sql, /source_event_id uuid REFERENCES al_source_event\(id\) ON DELETE SET NULL/i);
+  assert.match(sql, /candidate_text text NOT NULL CHECK \(length\(btrim\(candidate_text\)\) BETWEEN 1 AND 8192\)/i);
+  assert.match(sql, /status text NOT NULL DEFAULT 'pending' CHECK \(status IN \('pending','accepted','rejected'\)\)/i);
+  assert.match(sql, /confidence numeric\(4,3\) CHECK \(confidence IS NULL OR \(confidence >= 0 AND confidence <= 1\)\)/i);
+  assert.match(sql, /UNIQUE \(session_id, natural_key\)/i);
+  assert.match(sql, /CREATE INDEX idx_al_memory_candidate_session ON al_memory_candidate\(session_id\)/i);
+  assert.match(sql, /CREATE INDEX idx_al_memory_candidate_status ON al_memory_candidate\(status\)/i);
+  assert.match(sql, /CREATE INDEX idx_al_memory_candidate_retention ON al_memory_candidate\(memory_space, retention_class\)/i);
+  assert.doesNotMatch(sql, /CREATE TABLE al_memory\s*\(/i);
+  assert.doesNotMatch(sql, /CREATE TABLE al_memory_bridge\s*\(/i);
+  assert.doesNotMatch(sql, /CREATE TABLE al_memory_candidate[\s\S]*main_user_id/i);
+});
+
+test('initial migration gives AL-M1-011 memory candidates memory_candidate retention boundaries', () => {
+  const sql = loadInitialMigration();
+  assert.match(sql, /CREATE TABLE al_memory_candidate[\s\S]*retention_class al_retention_class NOT NULL DEFAULT 'memory_candidate'/i);
+  assert.match(sql, /CREATE TABLE al_memory_candidate[\s\S]*memory_space text NOT NULL DEFAULT 'default' CHECK \(memory_space ~/i);
+  assert.match(sql, /CREATE TABLE al_memory_candidate[\s\S]*source_system text NOT NULL DEFAULT 'agentlink' CHECK \(source_system ~/i);
+  assert.match(sql, /CREATE TABLE al_memory_candidate[\s\S]*sensitivity al_sensitivity NOT NULL DEFAULT 'internal'/i);
 });

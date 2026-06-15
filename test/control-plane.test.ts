@@ -900,3 +900,77 @@ test('session resolve creates large plus small for thread and does not create sm
   const lookup = controlPlane.getEntrySession(thread.entry.id);
   assert.equal(lookup?.session.id, threadResolved.smallSession.id);
 });
+
+test('memory candidate create is explicit, idempotent per session, and status-reviewable', () => {
+  const controlPlane = new InMemoryControlPlane({ now: () => new Date('2026-06-11T00:00:00.000Z') });
+  const ingested = controlPlane.ingestSourceEvent({
+    sourceSystem: 'fake-im',
+    sourceRef: 'memory-candidate:dm:1',
+    eventType: 'message.receive',
+    platform: 'fake-im',
+    entryType: 'dm',
+    externalChatId: 'dm-chat-1',
+    externalMessageId: 'dm-msg-1',
+    bodyText: '用户喜欢简洁回复',
+  });
+  const resolved = controlPlane.resolveSession({ entryId: ingested.entry.id });
+  assert.deepEqual(controlPlane.listMemoryCandidates(resolved.session.id), []);
+
+  const first = controlPlane.createMemoryCandidate({
+    sessionId: resolved.session.id,
+    entryId: ingested.entry.id,
+    sourceEventId: ingested.sourceEvent.id,
+    candidateText: ' 用户喜欢简洁回复 ',
+    confidence: 0.8765,
+    metadata: { extractor: 'manual' },
+  });
+  assert.equal(first.created, true);
+  assert.equal(first.memoryCandidate.status, 'pending');
+  assert.equal(first.memoryCandidate.candidateText, '用户喜欢简洁回复');
+  assert.equal(first.memoryCandidate.confidence, 0.877);
+  assert.equal(first.memoryCandidate.retentionClass, 'memory_candidate');
+  assert.equal(first.memoryCandidate.entryId, ingested.entry.id);
+  assert.equal(first.memoryCandidate.sourceEventId, ingested.sourceEvent.id);
+
+  const replay = controlPlane.createMemoryCandidate({ sessionId: resolved.session.id, candidateText: '用户喜欢简洁回复' });
+  assert.equal(replay.created, false);
+  assert.equal(replay.memoryCandidate.id, first.memoryCandidate.id);
+  assert.deepEqual(controlPlane.listMemoryCandidates(resolved.session.id).map((candidate) => candidate.id), [first.memoryCandidate.id]);
+
+  const updated = controlPlane.setMemoryCandidateStatus({ memoryCandidateId: first.memoryCandidate.id, status: 'accepted', reason: 'reviewed' });
+  assert.equal(updated.memoryCandidate.status, 'accepted');
+  assert.equal(updated.memoryCandidate.reason, 'reviewed');
+  assert.equal(controlPlane.getMemoryCandidate(first.memoryCandidate.id)?.status, 'accepted');
+});
+
+test('memory candidate create validates referenced session, entry, source event, and status', () => {
+  const controlPlane = new InMemoryControlPlane();
+  assert.throws(
+    () => controlPlane.createMemoryCandidate({ sessionId: 'missing-session', candidateText: 'remember this' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_SESSION_NOT_FOUND',
+  );
+  const ingested = controlPlane.ingestSourceEvent({
+    sourceSystem: 'fake-im',
+    sourceRef: 'memory-candidate:dm:2',
+    eventType: 'message.receive',
+    platform: 'fake-im',
+    entryType: 'dm',
+    externalChatId: 'dm-chat-2',
+    externalMessageId: 'dm-msg-2',
+    bodyText: '用户喜欢结构化输出',
+  });
+  const session = controlPlane.resolveSession({ entryId: ingested.entry.id }).session;
+  assert.throws(
+    () => controlPlane.createMemoryCandidate({ sessionId: session.id, entryId: 'missing-entry', candidateText: 'remember this' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_ENTRY_NOT_FOUND',
+  );
+  assert.throws(
+    () => controlPlane.createMemoryCandidate({ sessionId: session.id, sourceEventId: 'missing-event', candidateText: 'remember this' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_SOURCE_EVENT_NOT_FOUND',
+  );
+  const candidate = controlPlane.createMemoryCandidate({ sessionId: session.id, candidateText: 'remember this' }).memoryCandidate;
+  assert.throws(
+    () => controlPlane.setMemoryCandidateStatus({ memoryCandidateId: candidate.id, status: 'published' }),
+    (error) => error instanceof AgentlinkError && error.code === 'AL_BAD_REQUEST',
+  );
+});

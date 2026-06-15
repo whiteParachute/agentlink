@@ -7,6 +7,7 @@ import type {
   GroupProfileRecord,
   LeaseRecord,
   MainUserRecord,
+  MemoryCandidateRecord,
   PlatformIdentityRecord,
   RecoverDecision,
   RecoverableRunRecord,
@@ -128,4 +129,17 @@ export interface AgentlinkControlPlanePort {
   resolveSession(input: { entryId: string; retention?: RetentionMetadataInput }): MaybePromise<{ largeSession: SessionRecord; smallSession?: SessionRecord; session: SessionRecord; entry: EntryRecord; created: boolean }>;
   getSession(id: string): MaybePromise<SessionRecord | undefined>;
   getEntrySession(entryId: string): MaybePromise<{ session: SessionRecord; entry: EntryRecord } | undefined>;
+  createMemoryCandidate(input: {
+    sessionId: string;
+    entryId?: string;
+    sourceEventId?: string;
+    candidateText: string;
+    reason?: string;
+    confidence?: number;
+    metadata?: Record<string, unknown>;
+    retention?: RetentionMetadataInput;
+  }): MaybePromise<{ memoryCandidate: MemoryCandidateRecord; created: boolean }>;
+  getMemoryCandidate(id: string): MaybePromise<MemoryCandidateRecord | undefined>;
+  listMemoryCandidates(sessionId: string): MaybePromise<MemoryCandidateRecord[]>;
+  setMemoryCandidateStatus(input: { memoryCandidateId: string; status: string; reason?: string }): MaybePromise<{ memoryCandidate: MemoryCandidateRecord }>;
 }

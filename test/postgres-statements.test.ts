@@ -386,3 +386,15 @@ test('AL-M1-010 session statements use row_to_json envelopes and explicit entry 
   assert.match(PostgreSqlStatements.updateEntrySession, /session_id = \$2/i);
   assert.match(PostgreSqlStatements.updateEntrySession, /row_to_json\(e\) AS entry/i);
 });
+
+test('memory candidate statements use row_to_json envelope and natural-key idempotency shape', () => {
+  assert.match(PostgreSqlStatements.findMemoryCandidateById, /row_to_json\(mc\) AS memory_candidate/i);
+  assert.match(PostgreSqlStatements.findMemoryCandidateByNaturalKey, /WHERE mc\.session_id = \$1\s+AND mc\.natural_key = \$2/is);
+  assert.match(PostgreSqlStatements.listMemoryCandidatesBySession, /ORDER BY mc\.created_at ASC, mc\.id ASC/i);
+  assert.match(PostgreSqlStatements.insertMemoryCandidate, /INSERT INTO al_memory_candidate/i);
+  assert.match(PostgreSqlStatements.insertMemoryCandidate, /'pending'/i);
+  assert.match(PostgreSqlStatements.insertMemoryCandidate, /SELECT row_to_json\(mc\) AS memory_candidate\s+FROM inserted mc/is);
+  assert.match(PostgreSqlStatements.updateMemoryCandidateStatus, /SET status = \$2/i);
+  assert.match(PostgreSqlStatements.updateMemoryCandidateStatus, /reason = COALESCE\(\$3, reason\)/i);
+  assert.match(PostgreSqlStatements.updateMemoryCandidateStatus, /row_to_json\(mc\) AS memory_candidate/i);
+});

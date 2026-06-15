@@ -318,3 +318,25 @@ See `docs/m1-control-plane-reuse-boundary.md` for the per-object classification,
 - PostgreSQL session methods use explicit `row_to_json(s) AS session` envelopes and recover unique-race inserts by rolling back and re-reading durable session rows.
 - Tests added/updated for domain natural keys and rules, migration invariants including absence of `main_user_id`, in-memory idempotency and Entry backfill, PostgreSQL statement envelopes, repository large/small resolution and unique-race recovery, HTTP auth/route behavior, and fake-im/Feishu sample explicit resolve flows.
 - Remaining risks: no live PostgreSQL DSN smoke was run unless `AGENTLINK_DATABASE_URL` is provided; true concurrent PostgreSQL races are covered by scripted repository tests only. Memory, MemoryBridge, MemoryCandidate, Main Agent, Task routing, response gateway, real Feishu productization, frontend expansion, multi-tenant/multi-MainUser, complex permissions, group membership, and historical import remain intentionally out of scope.
+
+## 2026-06-15 AL-M1-011 MemoryCandidate minimal model update
+
+- Added the AL-M1-011 MemoryCandidate minimal model as a reviewable candidate layer above existing SourceEvent / Entry / Session records. It does not create finalized long-term Memory records and does not add MemoryBridge, LLM summarization, embedding, search, Main Agent, Task routing, response gateway, frontend expansion, real Feishu productization, multi-tenant, or multi-MainUser behavior.
+- Updated only `migrations/0001_initial.sql`: added `al_memory_candidate` with `session_id` FK, optional `entry_id` / `source_event_id` references, `candidate_text`, review `status`, `reason`, optional `confidence`, stable `natural_key`, metadata, memory-candidate retention metadata, `UNIQUE(session_id, natural_key)`, and session/status/retention indexes. `al_memory` and `al_memory_bridge` remain absent.
+- Added `MemoryCandidateRecord` / `MemoryCandidateStatus` and `src/domain/memory-candidate.ts` for fail-closed validation of status/text/confidence plus delimiter-safe stable natural-key construction.
+- Added `MEMORY_CANDIDATE_RETENTION_DEFAULTS` as `memory_candidate/default/agentlink/internal`.
+- Wired explicit candidate operations through the control-plane port, in-memory implementation, PostgreSQL statements/repository, and Postgres adapter:
+  - `createMemoryCandidate(...)`
+  - `getMemoryCandidate(id)`
+  - `listMemoryCandidates(sessionId)`
+  - `setMemoryCandidateStatus(...)`
+- Candidate creation is explicit and idempotent per `(session_id, natural_key)`. It validates referenced Session, Entry, and SourceEvent records; ingress and session resolve do not auto-create candidates.
+- Added HTTP endpoints behind the existing ingress bearer guard:
+  - `POST /api/v1/memory-candidates`
+  - `GET /api/v1/memory-candidates/{id}`
+  - `GET /api/v1/sessions/{id}/memory-candidates`
+  - `PATCH /api/v1/memory-candidates/{id}/status`
+  `/api/v1/meta` now advertises `memory-candidate-api`.
+- PostgreSQL methods use explicit `row_to_json(mc) AS memory_candidate` envelopes and recover unique-race inserts by re-reading durable candidates.
+- Tests added/updated for migration invariants, domain validation and natural keys, retention defaults, in-memory create/replay/list/status/references, PostgreSQL statement envelopes, repository create/replay/list/status/unique-race behavior, HTTP auth/201/200/get/list/patch/route-order/snake_case behavior, and no automatic candidate creation during ingress/session resolve.
+- Remaining risks: no live PostgreSQL DSN smoke was run unless `AGENTLINK_DATABASE_URL` is provided; true concurrent PostgreSQL races are covered by scripted repository tests only. Finalized Memory, MemoryBridge, LLM extraction/summarization, embedding/search, Main Agent, Task routing, response gateway, real Feishu/OAuth/webhook handling, frontend expansion, multi-tenant/multi-MainUser, cross-domain memory flow, and historical import remain intentionally out of scope.

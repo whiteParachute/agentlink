@@ -66,6 +66,7 @@ test('health, ready, and meta endpoints return service metadata', async () => {
     assert.equal(body.capabilities.includes('feishu-sample-api'), true);
     assert.equal(body.capabilities.includes('reply-mode-api'), true);
     assert.equal(body.capabilities.includes('session-api'), true);
+    assert.equal(body.capabilities.includes('memory-candidate-api'), true);
   });
 });
 
@@ -1851,4 +1852,111 @@ test('HTTP Feishu sample endpoint rejects invalid sample payloads', async () => 
       assert.equal(((await response.json()) as { error: { code: string } }).error.code, 'AL_BAD_REQUEST');
     }
   }, { ingressBearerToken: 'feishu-sample-token' });
+});
+
+test('HTTP memory candidate endpoint requires bearer and explicitly creates/reviews candidates', async () => {
+  await withServer(async (baseUrl) => {
+    const auth = { authorization: 'Bearer test-ingress' };
+    const noToken = await postJson(baseUrl, '/api/v1/memory-candidates', { session_id: 'missing', candidate_text: 'remember this' });
+    assert.equal(noToken.status, 401);
+    const wrongToken = await postJson(baseUrl, '/api/v1/memory-candidates', { session_id: 'missing', candidate_text: 'remember this' }, { authorization: 'Bearer wrong' });
+    assert.equal(wrongToken.status, 403);
+
+    const fake = await postJson(
+      baseUrl,
+      '/api/v1/fake-im/events',
+      { kind: 'dm', message_id: 'mc-msg-1', text: '用户喜欢简洁回复' },
+      auth,
+    );
+    assert.equal(fake.status, 201);
+    const fakeBody = (await fake.json()) as { source_event: { id: string }; entry: { id: string; session_id?: string | null } };
+    assert.equal(fakeBody.entry.session_id, undefined);
+
+    const resolved = await postJson(baseUrl, '/api/v1/sessions/resolve', { entry_id: fakeBody.entry.id }, auth);
+    assert.equal(resolved.status, 201);
+    const resolvedBody = (await resolved.json()) as { session: { id: string }; entry: { id: string; session_id: string } };
+    assert.equal(resolvedBody.entry.session_id, resolvedBody.session.id);
+
+    const beforeList = await fetch(`${baseUrl}/api/v1/sessions/${resolvedBody.session.id}/memory-candidates`, { headers: auth });
+    assert.equal(beforeList.status, 200);
+    assert.deepEqual(((await beforeList.json()) as { memory_candidates: unknown[] }).memory_candidates, []);
+
+    const first = await postJson(
+      baseUrl,
+      '/api/v1/memory-candidates',
+      {
+        session_id: resolvedBody.session.id,
+        entry_id: fakeBody.entry.id,
+        source_event_id: fakeBody.source_event.id,
+        candidate_text: ' 用户喜欢简洁回复 ',
+        confidence: 0.8,
+        metadata: { extractor: 'manual' },
+      },
+      auth,
+    );
+    assert.equal(first.status, 201);
+    const firstBody = (await first.json()) as { created: boolean; memory_candidate: Record<string, unknown> };
+    assert.equal(firstBody.created, true);
+    assert.equal(firstBody.memory_candidate.session_id, resolvedBody.session.id);
+    assert.equal(firstBody.memory_candidate.entry_id, fakeBody.entry.id);
+    assert.equal(firstBody.memory_candidate.source_event_id, fakeBody.source_event.id);
+    assert.equal(firstBody.memory_candidate.candidate_text, '用户喜欢简洁回复');
+    assert.equal(firstBody.memory_candidate.status, 'pending');
+    assert.equal((firstBody.memory_candidate.retention as Record<string, string>).retention_class, 'memory_candidate');
+
+    const replay = await postJson(baseUrl, '/api/v1/memory-candidates', { session_id: resolvedBody.session.id, candidate_text: '用户喜欢简洁回复' }, auth);
+    assert.equal(replay.status, 200);
+    const replayBody = (await replay.json()) as { created: boolean; memory_candidate: Record<string, unknown> };
+    assert.equal(replayBody.created, false);
+    assert.equal(replayBody.memory_candidate.id, firstBody.memory_candidate.id);
+
+    const get = await fetch(`${baseUrl}/api/v1/memory-candidates/${firstBody.memory_candidate.id}`, { headers: auth });
+    assert.equal(get.status, 200);
+    assert.equal(((await get.json()) as { memory_candidate: Record<string, unknown> }).memory_candidate.id, firstBody.memory_candidate.id);
+
+    const list = await fetch(`${baseUrl}/api/v1/sessions/${resolvedBody.session.id}/memory-candidates`, { headers: auth });
+    assert.equal(list.status, 200);
+    const listBody = (await list.json()) as { memory_candidates: Array<Record<string, unknown>> };
+    assert.deepEqual(listBody.memory_candidates.map((candidate) => candidate.id), [firstBody.memory_candidate.id]);
+
+    const patched = await patchJson(baseUrl, `/api/v1/memory-candidates/${firstBody.memory_candidate.id}/status`, { status: 'accepted', reason: 'reviewed' }, auth);
+    assert.equal(patched.status, 200);
+    const patchedBody = (await patched.json()) as { memory_candidate: Record<string, unknown> };
+    assert.equal(patchedBody.memory_candidate.status, 'accepted');
+    assert.equal(patchedBody.memory_candidate.reason, 'reviewed');
+  }, { ingressBearerToken: 'test-ingress' });
+});
+
+test('HTTP memory candidate endpoint validates references, status, and route order', async () => {
+  await withServer(async (baseUrl) => {
+    const auth = { authorization: 'Bearer test-ingress' };
+    const missingSession = await postJson(baseUrl, '/api/v1/memory-candidates', { session_id: 'missing-session', candidate_text: 'remember this' }, auth);
+    assert.equal(missingSession.status, 404);
+    assert.equal(((await missingSession.json()) as { error: { code: string } }).error.code, 'AL_SESSION_NOT_FOUND');
+
+    const fake = await postJson(baseUrl, '/api/v1/fake-im/events', { kind: 'dm', message_id: 'mc-msg-2', text: '用户喜欢结构化输出' }, auth);
+    const fakeBody = (await fake.json()) as { source_event: { id: string }; entry: { id: string } };
+    const resolved = await postJson(baseUrl, '/api/v1/sessions/resolve', { entry_id: fakeBody.entry.id }, auth);
+    const sessionId = ((await resolved.json()) as { session: { id: string } }).session.id;
+
+    const missingEntry = await postJson(baseUrl, '/api/v1/memory-candidates', { session_id: sessionId, entry_id: 'missing-entry', candidate_text: 'remember this' }, auth);
+    assert.equal(missingEntry.status, 404);
+    assert.equal(((await missingEntry.json()) as { error: { code: string } }).error.code, 'AL_ENTRY_NOT_FOUND');
+
+    const invalidConfidence = await postJson(baseUrl, '/api/v1/memory-candidates', { session_id: sessionId, candidate_text: 'remember this', confidence: 2 }, auth);
+    assert.equal(invalidConfidence.status, 400);
+
+    const created = await postJson(baseUrl, '/api/v1/memory-candidates', { session_id: sessionId, candidate_text: '用户喜欢结构化输出' }, auth);
+    const candidateId = ((await created.json()) as { memory_candidate: { id: string } }).memory_candidate.id;
+    const invalidStatus = await patchJson(baseUrl, `/api/v1/memory-candidates/${candidateId}/status`, { status: 'published' }, auth);
+    assert.equal(invalidStatus.status, 400);
+    const missingCandidate = await fetch(`${baseUrl}/api/v1/memory-candidates/missing`, { headers: auth });
+    assert.equal(missingCandidate.status, 404);
+
+    const listRoute = await fetch(`${baseUrl}/api/v1/sessions/${sessionId}/memory-candidates`, { headers: auth });
+    assert.equal(listRoute.status, 200);
+    const listBody = (await listRoute.json()) as { memory_candidates?: unknown[]; session?: unknown };
+    assert.ok(Array.isArray(listBody.memory_candidates));
+    assert.equal(listBody.session, undefined);
+  }, { ingressBearerToken: 'test-ingress' });
 });

@@ -172,6 +172,13 @@ export const SESSION_RETENTION_DEFAULTS: RetentionDefaults = {
 // AL-M1-006 inbound source events and entries are short-term ingress records.
 // The ingestion path overrides sourceSystem with the normalized inbound
 // source_system so retention queries can attribute data to the real source.
+export const MEMORY_CANDIDATE_RETENTION_DEFAULTS: RetentionDefaults = {
+  retentionClass: 'memory_candidate',
+  sensitivity: 'internal',
+  memorySpace: DEFAULT_MEMORY_SPACE,
+  sourceSystem: DEFAULT_SOURCE_SYSTEM,
+};
+
 export const SOURCE_EVENT_RETENTION_DEFAULTS: RetentionDefaults = {
   retentionClass: 'short_term',
   sensitivity: 'internal',

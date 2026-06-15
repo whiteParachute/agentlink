@@ -297,6 +297,28 @@ export interface SessionRecord {
   updatedAt: string;
 }
 
+
+export type MemoryCandidateStatus = 'pending' | 'accepted' | 'rejected';
+
+export interface MemoryCandidateRecord {
+  id: string;
+  sessionId: string;
+  entryId?: string;
+  sourceEventId?: string;
+  candidateText: string;
+  status: MemoryCandidateStatus;
+  reason: string;
+  confidence?: number;
+  naturalKey: string;
+  metadata: JsonRecord;
+  retentionClass: RetentionClass;
+  memorySpace: string;
+  sourceSystem: string;
+  sensitivity: Sensitivity;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface GroupContextProjection {
   groupProfile: GroupProfileRecord;
   platform: string;

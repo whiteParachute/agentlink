@@ -12,6 +12,7 @@ import type {
   JsonRecord,
   LeaseRecord,
   MainUserRecord,
+  MemoryCandidateRecord,
   PlatformIdentityRecord,
   PolicyDecisionRecord,
   RecoverableRunRecord,
@@ -55,6 +56,7 @@ import {
   ENTRY_RETENTION_DEFAULTS,
   GROUP_PROFILE_RETENTION_DEFAULTS,
   MAIN_USER_RETENTION_DEFAULTS,
+  MEMORY_CANDIDATE_RETENTION_DEFAULTS,
   PLATFORM_IDENTITY_RETENTION_DEFAULTS,
   SOURCE_EVENT_RETENTION_DEFAULTS,
   SESSION_RETENTION_DEFAULTS,
@@ -64,6 +66,13 @@ import {
   type RetentionMetadataInput,
   withoutRawRetention,
 } from '../domain/retention.js';
+import {
+  buildCandidateNaturalKey,
+  normalizeCandidateReason,
+  normalizeCandidateStatus,
+  normalizeCandidateText,
+  normalizeConfidence,
+} from '../domain/memory-candidate.js';
 import { planSessionForEntry, type SessionDraft } from '../domain/session.js';
 import { decideRetry } from '../domain/retry.js';
 import { hashStable, stableStringify } from '../domain/signature.js';
@@ -1046,6 +1055,80 @@ export class PostgreSqlRepository {
     return { session, entry };
   }
 
+  async createMemoryCandidate(input: {
+    sessionId: string;
+    entryId?: string;
+    sourceEventId?: string;
+    candidateText: string;
+    reason?: string;
+    confidence?: number;
+    metadata?: JsonRecord;
+    retention?: RetentionMetadataInput;
+  }): Promise<{ memoryCandidate: MemoryCandidateRecord; created: boolean }> {
+    const candidateText = normalizeCandidateText(input.candidateText);
+    const naturalKey = buildCandidateNaturalKey(candidateText);
+    try {
+      return await withTransaction(this.client, async (tx) => {
+        const existing = await this.findMemoryCandidateByNaturalKey(tx, input.sessionId, naturalKey);
+        if (existing) return { memoryCandidate: existing, created: false };
+        await this.mustFindSessionById(tx, input.sessionId);
+        if (input.entryId) await this.mustFindEntryById(tx, input.entryId);
+        if (input.sourceEventId) await this.mustFindSourceEventById(tx, input.sourceEventId);
+        const now = this.timestamp();
+        const retention = normalizeRetentionMetadata(input.retention, MEMORY_CANDIDATE_RETENTION_DEFAULTS);
+        const memoryCandidate = mapMemoryCandidate(requireSingleRow(
+          await tx.query<EnvelopeRow>(PostgreSqlStatements.insertMemoryCandidate, [
+            randomUUID(),
+            input.sessionId,
+            input.entryId ?? null,
+            input.sourceEventId ?? null,
+            candidateText,
+            normalizeCandidateReason(input.reason),
+            normalizeConfidence(input.confidence) ?? null,
+            naturalKey,
+            toJsonbParam(input.metadata ?? {}),
+            retention.retentionClass,
+            retention.memorySpace,
+            retention.sourceSystem,
+            retention.sensitivity,
+            now,
+          ]),
+          'AL_INTERNAL',
+          'MemoryCandidate insert returned no row',
+        ).memory_candidate);
+        return { memoryCandidate, created: true };
+      });
+    } catch (error: unknown) {
+      if (!isUniqueViolation(error)) throw error;
+      const existing = await this.findMemoryCandidateByNaturalKey(this.client, input.sessionId, naturalKey);
+      if (!existing) throw error;
+      return { memoryCandidate: existing, created: false };
+    }
+  }
+
+  async getMemoryCandidate(id: string): Promise<MemoryCandidateRecord | undefined> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.findMemoryCandidateById, [id]);
+    if (result.rowCount === 0) return undefined;
+    return mapMemoryCandidate(requireSingleRow(result, 'AL_INTERNAL', 'MemoryCandidate lookup returned rowCount without a row').memory_candidate);
+  }
+
+  async listMemoryCandidates(sessionId: string): Promise<MemoryCandidateRecord[]> {
+    await this.mustFindSessionById(this.client, sessionId);
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.listMemoryCandidatesBySession, [sessionId]);
+    return result.rows.map((row) => mapMemoryCandidate(row.memory_candidate));
+  }
+
+  async setMemoryCandidateStatus(input: { memoryCandidateId: string; status: string; reason?: string }): Promise<{ memoryCandidate: MemoryCandidateRecord }> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.updateMemoryCandidateStatus, [
+      input.memoryCandidateId,
+      normalizeCandidateStatus(input.status),
+      input.reason !== undefined ? normalizeCandidateReason(input.reason) : null,
+      this.timestamp(),
+    ]);
+    if (result.rowCount === 0) throw new AgentlinkError(404, 'AL_MEMORY_CANDIDATE_NOT_FOUND', 'Memory candidate not found');
+    return { memoryCandidate: mapMemoryCandidate(requireSingleRow(result, 'AL_INTERNAL', 'MemoryCandidate status update returned no row').memory_candidate) };
+  }
+
   async revokeDevice(deviceId: string, reason = 'device_revoked'): Promise<{ device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] }> {
     return await withTransaction(this.client, async (tx) => {
       const now = this.timestamp();
@@ -1321,10 +1404,40 @@ export class PostgreSqlRepository {
     return mapEntry(requireSingleRow(result, 'AL_INTERNAL', 'Entry lookup returned rowCount without a row').entry);
   }
 
+  private async mustFindEntryById(client: SqlClient, entryId: string): Promise<EntryRecord> {
+    const entry = await this.findEntryById(client, entryId);
+    if (!entry) throw new AgentlinkError(404, 'AL_ENTRY_NOT_FOUND', 'Entry not found');
+    return entry;
+  }
+
+  private async mustFindSourceEventById(client: SqlClient, sourceEventId: string): Promise<SourceEventRecord> {
+    const sourceEvent = await this.getSourceEventFromClient(client, sourceEventId);
+    if (!sourceEvent) throw new AgentlinkError(404, 'AL_SOURCE_EVENT_NOT_FOUND', 'Source event not found');
+    return sourceEvent;
+  }
+
+  private async getSourceEventFromClient(client: SqlClient, sourceEventId: string): Promise<SourceEventRecord | undefined> {
+    const result = await client.query<EnvelopeRow>(PostgreSqlStatements.findSourceEventById, [sourceEventId]);
+    if (result.rowCount === 0) return undefined;
+    return mapSourceEvent(requireSingleRow(result, 'AL_INTERNAL', 'SourceEvent lookup returned rowCount without a row').source_event);
+  }
+
   private async findSessionByNaturalKey(client: SqlClient, sessionScope: string, naturalKey: string): Promise<SessionRecord | undefined> {
     const result = await client.query<EnvelopeRow>(PostgreSqlStatements.findSessionByNaturalKey, [sessionScope, naturalKey]);
     if (result.rowCount === 0) return undefined;
     return mapSession(requireSingleRow(result, 'AL_INTERNAL', 'Session lookup returned rowCount without a row').session);
+  }
+
+  private async mustFindSessionById(client: SqlClient, sessionId: string): Promise<SessionRecord> {
+    const result = await client.query<EnvelopeRow>(PostgreSqlStatements.findSessionById, [sessionId]);
+    if (result.rowCount === 0) throw new AgentlinkError(404, 'AL_SESSION_NOT_FOUND', 'Session not found');
+    return mapSession(requireSingleRow(result, 'AL_INTERNAL', 'Session lookup returned rowCount without a row').session);
+  }
+
+  private async findMemoryCandidateByNaturalKey(client: SqlClient, sessionId: string, naturalKey: string): Promise<MemoryCandidateRecord | undefined> {
+    const result = await client.query<EnvelopeRow>(PostgreSqlStatements.findMemoryCandidateByNaturalKey, [sessionId, naturalKey]);
+    if (result.rowCount === 0) return undefined;
+    return mapMemoryCandidate(requireSingleRow(result, 'AL_INTERNAL', 'MemoryCandidate lookup returned rowCount without a row').memory_candidate);
   }
 
   private async getOrCreateSession(client: SqlClient, draft: SessionDraft, retentionInput: RetentionMetadataInput | undefined): Promise<{ session: SessionRecord; created: boolean }> {
@@ -1385,6 +1498,7 @@ interface EnvelopeRow {
   source_event?: unknown;
   entry?: unknown;
   session?: unknown;
+  memory_candidate?: unknown;
 }
 
 type RunEventRow = Record<string, unknown>;
@@ -1729,6 +1843,29 @@ function mapSession(value: unknown): SessionRecord {
   return record;
 }
 
+function mapMemoryCandidate(value: unknown): MemoryCandidateRecord {
+  const row = asRecord(value, 'memory_candidate');
+  const record: MemoryCandidateRecord = {
+    id: readString(row, 'id'),
+    sessionId: readString(row, 'session_id'),
+    candidateText: readString(row, 'candidate_text'),
+    status: readString(row, 'status') as MemoryCandidateRecord['status'],
+    reason: readStringAllowEmpty(row, 'reason'),
+    naturalKey: readString(row, 'natural_key'),
+    metadata: readJsonRecord(row, 'metadata'),
+    retentionClass: readRetentionClass(row, 'retention_class'),
+    memorySpace: readString(row, 'memory_space'),
+    sourceSystem: readString(row, 'source_system'),
+    sensitivity: readSensitivity(row, 'sensitivity'),
+    createdAt: readTimestamp(row, 'created_at'),
+    updatedAt: readTimestamp(row, 'updated_at'),
+  };
+  setOptionalString(record, 'entryId', row.entry_id);
+  setOptionalString(record, 'sourceEventId', row.source_event_id);
+  setOptionalNumber(record, 'confidence', row.confidence);
+  return record;
+}
+
 function mapSourceEvent(value: unknown): SourceEventRecord {
   const row = asRecord(value, 'source_event');
   const record: SourceEventRecord = {
@@ -1870,6 +2007,22 @@ function setOptionalTimestamp<T extends object, K extends keyof T>(target: T, ke
   }
   if (typeof value !== 'string') throw new AgentlinkError(500, 'AL_REPOSITORY_MAPPING', `${String(key)} must be a timestamp`);
   Object.assign(target, { [key]: value });
+}
+
+function setOptionalNumber<T extends object, K extends keyof T>(target: T, key: K, value: unknown): void {
+  if (value === null || value === undefined) return;
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    Object.assign(target, { [key]: value });
+    return;
+  }
+  if (typeof value === 'string') {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      Object.assign(target, { [key]: parsed });
+      return;
+    }
+  }
+  throw new AgentlinkError(500, 'AL_REPOSITORY_MAPPING', `${String(key)} must be a number`);
 }
 
 function setOptionalRecord<T extends object, K extends keyof T>(target: T, key: K, value: unknown): void {

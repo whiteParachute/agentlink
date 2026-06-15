@@ -10,6 +10,7 @@ import type {
   JsonRecord,
   LeaseRecord,
   MainUserRecord,
+  MemoryCandidateRecord,
   PlatformIdentityRecord,
   PolicyDecisionRecord,
   RecoverDecision,
@@ -59,6 +60,7 @@ import {
   ENTRY_RETENTION_DEFAULTS,
   GROUP_PROFILE_RETENTION_DEFAULTS,
   MAIN_USER_RETENTION_DEFAULTS,
+  MEMORY_CANDIDATE_RETENTION_DEFAULTS,
   PLATFORM_IDENTITY_RETENTION_DEFAULTS,
   SOURCE_EVENT_RETENTION_DEFAULTS,
   SESSION_RETENTION_DEFAULTS,
@@ -68,6 +70,13 @@ import {
   type RetentionMetadata,
   type RetentionMetadataInput,
 } from '../domain/retention.js';
+import {
+  buildCandidateNaturalKey,
+  normalizeCandidateReason,
+  normalizeCandidateStatus,
+  normalizeCandidateText,
+  normalizeConfidence,
+} from '../domain/memory-candidate.js';
 import { planSessionForEntry, type SessionDraft } from '../domain/session.js';
 import { decideRetry } from '../domain/retry.js';
 import { hashStable, stableStringify } from '../domain/signature.js';
@@ -173,6 +182,8 @@ export class InMemoryControlPlane {
   private readonly entryBySourceEvent = new Map<string, string>();
   private readonly sessions = new Map<string, SessionRecord>();
   private readonly sessionUnique = new Map<string, string>();
+  private readonly memoryCandidates = new Map<string, MemoryCandidateRecord>();
+  private readonly memoryCandidateUnique = new Map<string, string>();
 
   constructor(options: ControlPlaneOptions = {}) {
     this.now = options.now ?? (() => new Date());
@@ -820,6 +831,74 @@ export class InMemoryControlPlane {
     return { session, entry };
   }
 
+  createMemoryCandidate(input: {
+    sessionId: string;
+    entryId?: string;
+    sourceEventId?: string;
+    candidateText: string;
+    reason?: string;
+    confidence?: number;
+    metadata?: JsonRecord;
+    retention?: RetentionMetadataInput;
+  }): { memoryCandidate: MemoryCandidateRecord; created: boolean } {
+    this.mustGetSession(input.sessionId);
+    if (input.entryId) this.mustGetEntry(input.entryId);
+    if (input.sourceEventId) this.mustGetSourceEvent(input.sourceEventId);
+    const candidateText = normalizeCandidateText(input.candidateText);
+    const naturalKey = buildCandidateNaturalKey(candidateText);
+    const uniqueKey = memoryCandidateKey(input.sessionId, naturalKey);
+    const existingId = this.memoryCandidateUnique.get(uniqueKey);
+    if (existingId) return { memoryCandidate: this.mustGetMemoryCandidate(existingId), created: false };
+    const now = this.timestamp();
+    const retention = normalizeRetentionMetadata(input.retention, MEMORY_CANDIDATE_RETENTION_DEFAULTS);
+    const confidence = input.confidence !== undefined ? normalizeConfidence(input.confidence) : undefined;
+    const memoryCandidate: MemoryCandidateRecord = {
+      id: randomUUID(),
+      sessionId: input.sessionId,
+      ...(input.entryId ? { entryId: input.entryId } : {}),
+      ...(input.sourceEventId ? { sourceEventId: input.sourceEventId } : {}),
+      candidateText,
+      status: 'pending',
+      reason: normalizeCandidateReason(input.reason),
+      ...(confidence !== undefined ? { confidence } : {}),
+      naturalKey,
+      metadata: input.metadata ?? {},
+      retentionClass: retention.retentionClass,
+      memorySpace: retention.memorySpace,
+      sourceSystem: retention.sourceSystem,
+      sensitivity: retention.sensitivity,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.memoryCandidates.set(memoryCandidate.id, memoryCandidate);
+    this.memoryCandidateUnique.set(uniqueKey, memoryCandidate.id);
+    return { memoryCandidate, created: true };
+  }
+
+  getMemoryCandidate(id: string): MemoryCandidateRecord | undefined {
+    return this.memoryCandidates.get(id);
+  }
+
+  listMemoryCandidates(sessionId: string): MemoryCandidateRecord[] {
+    this.mustGetSession(sessionId);
+    return [...this.memoryCandidates.values()]
+      .filter((candidate) => candidate.sessionId === sessionId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id));
+  }
+
+  setMemoryCandidateStatus(input: { memoryCandidateId: string; status: string; reason?: string }): { memoryCandidate: MemoryCandidateRecord } {
+    const existing = this.memoryCandidates.get(input.memoryCandidateId);
+    if (!existing) throw new AgentlinkError(404, 'AL_MEMORY_CANDIDATE_NOT_FOUND', 'Memory candidate not found');
+    const updated: MemoryCandidateRecord = {
+      ...existing,
+      status: normalizeCandidateStatus(input.status),
+      ...(input.reason !== undefined ? { reason: normalizeCandidateReason(input.reason) } : {}),
+      updatedAt: this.timestamp(),
+    };
+    this.memoryCandidates.set(updated.id, updated);
+    return { memoryCandidate: updated };
+  }
+
   revokeDevice(deviceId: string, reason = 'device_revoked'): { device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] } {
     const device = this.mustGetDevice(deviceId);
     if (device.status === 'REVOKED') return { device, tasks: [], runs: [], leases: [] };
@@ -1276,6 +1355,18 @@ export class InMemoryControlPlane {
     return sourceEvent;
   }
 
+  private mustGetEntry(entryId: string): EntryRecord {
+    const entry = this.entries.get(entryId);
+    if (!entry) throw new AgentlinkError(404, 'AL_ENTRY_NOT_FOUND', 'Entry not found');
+    return entry;
+  }
+
+  private mustGetMemoryCandidate(memoryCandidateId: string): MemoryCandidateRecord {
+    const memoryCandidate = this.memoryCandidates.get(memoryCandidateId);
+    if (!memoryCandidate) throw new AgentlinkError(404, 'AL_MEMORY_CANDIDATE_NOT_FOUND', 'Memory candidate not found');
+    return memoryCandidate;
+  }
+
   private mustGetEntryBySourceEvent(sourceEventId: string): EntryRecord {
     const entryId = this.entryBySourceEvent.get(sourceEventId);
     if (!entryId) throw new AgentlinkError(404, 'AL_ENTRY_NOT_FOUND', 'Entry not found');
@@ -1525,6 +1616,10 @@ function sourceEventKey(sourceSystem: string, sourceHash: string): string {
 
 function sessionKey(sessionScope: string, naturalKey: string): string {
   return `${sessionScope}:${naturalKey}`;
+}
+
+function memoryCandidateKey(sessionId: string, naturalKey: string): string {
+  return `${sessionId}:${naturalKey}`;
 }
 
 function normalizeOptionalDisplayName(displayName: string | undefined): string | undefined {

@@ -5,7 +5,7 @@ import { InMemoryControlPlane, type CreateTaskInput, type RegisterDeviceInput } 
 import { PostgresControlPlane } from './control-plane/postgres.js';
 import type { AgentlinkControlPlanePort } from './control-plane/port.js';
 import { PgRuntime } from './db/pg-client.js';
-import type { CapabilityGrantRecord, ChannelUserRecord, DeviceRecord, EntryRecord, GroupProfileRecord, JsonRecord, MainUserRecord, PlatformIdentityRecord, RunRecord, RunnerRecord, SourceEventRecord, SessionRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
+import type { CapabilityGrantRecord, ChannelUserRecord, DeviceRecord, EntryRecord, GroupProfileRecord, JsonRecord, MainUserRecord, MemoryCandidateRecord, PlatformIdentityRecord, RunRecord, RunnerRecord, SourceEventRecord, SessionRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
 import { mapFakeImEventToIngest, normalizeFakeImEvent, toFakeImEventDto } from './domain/fake-im.js';
 import { mapFeishuSampleEventToIngest, normalizeFeishuSampleEvent, toFeishuSampleEventDto } from './domain/feishu-sample.js';
 import { resolveReplyMode, type ReplyModeResolution } from './domain/reply-mode.js';
@@ -121,6 +121,7 @@ async function handleRequest(
         'feishu-sample-api',
         'reply-mode-api',
         'session-api',
+        'memory-candidate-api',
       ],
     });
     return;
@@ -374,12 +375,66 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/v1/memory-candidates') {
+    requireIngressBearer(req, security);
+    const body = await readJsonRecord(req);
+    const entryId = optionalString(body, 'entry_id');
+    const sourceEventId = optionalString(body, 'source_event_id');
+    const reason = optionalString(body, 'reason');
+    const confidence = optionalNumber(body, 'confidence');
+    const metadata = optionalRecord(body, 'metadata');
+    const retention = optionalRetention(body, 'retention');
+    const result = await controlPlane.createMemoryCandidate({
+      sessionId: requireString(body, 'session_id'),
+      candidateText: requireString(body, 'candidate_text'),
+      ...(entryId !== undefined ? { entryId } : {}),
+      ...(sourceEventId !== undefined ? { sourceEventId } : {}),
+      ...(reason !== undefined ? { reason } : {}),
+      ...(confidence !== undefined ? { confidence } : {}),
+      ...(metadata !== undefined ? { metadata } : {}),
+      ...(retention ? { retention } : {}),
+    });
+    sendJson(res, result.created ? 201 : 200, { memory_candidate: toMemoryCandidateDto(result.memoryCandidate), created: result.created });
+    return;
+  }
+
+  const sessionMemoryCandidatesMatch = /^\/api\/v1\/sessions\/([^/]+)\/memory-candidates$/.exec(url.pathname);
+  if (req.method === 'GET' && sessionMemoryCandidatesMatch) {
+    requireIngressBearer(req, security);
+    const memoryCandidates = await controlPlane.listMemoryCandidates(sessionMemoryCandidatesMatch[1] ?? '');
+    sendJson(res, 200, { memory_candidates: memoryCandidates.map(toMemoryCandidateDto) });
+    return;
+  }
+
   const sessionGetMatch = /^\/api\/v1\/sessions\/([^/]+)$/.exec(url.pathname);
   if (req.method === 'GET' && sessionGetMatch) {
     requireIngressBearer(req, security);
     const session = await controlPlane.getSession(sessionGetMatch[1] ?? '');
     if (!session) throw new AgentlinkError(404, 'AL_SESSION_NOT_FOUND', 'Session not found');
     sendJson(res, 200, { session: toSessionDto(session) });
+    return;
+  }
+
+  const memoryCandidateStatusMatch = /^\/api\/v1\/memory-candidates\/([^/]+)\/status$/.exec(url.pathname);
+  if (req.method === 'PATCH' && memoryCandidateStatusMatch) {
+    requireIngressBearer(req, security);
+    const body = await readJsonRecord(req);
+    const reason = optionalString(body, 'reason');
+    const result = await controlPlane.setMemoryCandidateStatus({
+      memoryCandidateId: memoryCandidateStatusMatch[1] ?? '',
+      status: requireString(body, 'status'),
+      ...(reason !== undefined ? { reason } : {}),
+    });
+    sendJson(res, 200, { memory_candidate: toMemoryCandidateDto(result.memoryCandidate) });
+    return;
+  }
+
+  const memoryCandidateGetMatch = /^\/api\/v1\/memory-candidates\/([^/]+)$/.exec(url.pathname);
+  if (req.method === 'GET' && memoryCandidateGetMatch) {
+    requireIngressBearer(req, security);
+    const memoryCandidate = await controlPlane.getMemoryCandidate(memoryCandidateGetMatch[1] ?? '');
+    if (!memoryCandidate) throw new AgentlinkError(404, 'AL_MEMORY_CANDIDATE_NOT_FOUND', 'Memory candidate not found');
+    sendJson(res, 200, { memory_candidate: toMemoryCandidateDto(memoryCandidate) });
     return;
   }
 
@@ -1024,6 +1079,29 @@ function toSessionDto(session: SessionRecord) {
   };
 }
 
+function toMemoryCandidateDto(memoryCandidate: MemoryCandidateRecord) {
+  return {
+    id: memoryCandidate.id,
+    session_id: memoryCandidate.sessionId,
+    entry_id: memoryCandidate.entryId,
+    source_event_id: memoryCandidate.sourceEventId,
+    candidate_text: memoryCandidate.candidateText,
+    status: memoryCandidate.status,
+    reason: memoryCandidate.reason,
+    confidence: memoryCandidate.confidence,
+    natural_key: memoryCandidate.naturalKey,
+    metadata: memoryCandidate.metadata,
+    retention: {
+      retention_class: memoryCandidate.retentionClass,
+      memory_space: memoryCandidate.memorySpace,
+      source_system: memoryCandidate.sourceSystem,
+      sensitivity: memoryCandidate.sensitivity,
+    },
+    created_at: memoryCandidate.createdAt,
+    updated_at: memoryCandidate.updatedAt,
+  };
+}
+
 function toReplyModeResolutionDto(entryId: string, resolution: ReplyModeResolution) {
   return {
     entry_id: entryId,
@@ -1183,6 +1261,13 @@ function optionalInteger(body: JsonRecord, key: string): number | undefined {
   if (value === undefined) return undefined;
   if (!Number.isInteger(value)) throw new AgentlinkError(400, 'AL_BAD_REQUEST', `${key} must be an integer`);
   return value as number;
+}
+
+function optionalNumber(body: JsonRecord, key: string): number | undefined {
+  const value = body[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number' || !Number.isFinite(value)) throw new AgentlinkError(400, 'AL_BAD_REQUEST', `${key} must be a finite number`);
+  return value;
 }
 
 function optionalAccessMode(body: JsonRecord, key: string): WorkdirAccessMode | undefined {

@@ -1334,6 +1334,82 @@ SELECT row_to_json(e) AS entry
 FROM updated e;
 `,
 
+  findMemoryCandidateById: `
+SELECT row_to_json(mc) AS memory_candidate
+FROM al_memory_candidate mc
+WHERE mc.id = $1;
+`,
+
+  findMemoryCandidateByNaturalKey: `
+SELECT row_to_json(mc) AS memory_candidate
+FROM al_memory_candidate mc
+WHERE mc.session_id = $1
+  AND mc.natural_key = $2;
+`,
+
+  listMemoryCandidatesBySession: `
+SELECT row_to_json(mc) AS memory_candidate
+FROM al_memory_candidate mc
+WHERE mc.session_id = $1
+ORDER BY mc.created_at ASC, mc.id ASC;
+`,
+
+  insertMemoryCandidate: `
+WITH inserted AS (
+  INSERT INTO al_memory_candidate (
+    id,
+    session_id,
+    entry_id,
+    source_event_id,
+    candidate_text,
+    status,
+    reason,
+    confidence,
+    natural_key,
+    metadata,
+    retention_class,
+    memory_space,
+    source_system,
+    sensitivity,
+    created_at,
+    updated_at
+  ) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    'pending',
+    $6,
+    $7,
+    $8,
+    $9::jsonb,
+    $10::al_retention_class,
+    $11,
+    $12,
+    $13::al_sensitivity,
+    $14,
+    $14
+  )
+  RETURNING *
+)
+SELECT row_to_json(mc) AS memory_candidate
+FROM inserted mc;
+`,
+
+  updateMemoryCandidateStatus: `
+WITH updated AS (
+  UPDATE al_memory_candidate
+  SET status = $2,
+      reason = COALESCE($3, reason),
+      updated_at = $4
+  WHERE id = $1
+  RETURNING *
+)
+SELECT row_to_json(mc) AS memory_candidate
+FROM updated mc;
+`,
+
   insertSourceEvent: `
 WITH inserted AS (
   INSERT INTO al_source_event (
