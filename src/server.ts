@@ -8,6 +8,7 @@ import { PgRuntime } from './db/pg-client.js';
 import type { CapabilityGrantRecord, ChannelUserRecord, DeviceRecord, EntryRecord, GroupProfileRecord, JsonRecord, MainUserRecord, PlatformIdentityRecord, RunRecord, RunnerRecord, SourceEventRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
 import { mapFakeImEventToIngest, normalizeFakeImEvent, toFakeImEventDto } from './domain/fake-im.js';
 import { mapFeishuSampleEventToIngest, normalizeFeishuSampleEvent, toFeishuSampleEventDto } from './domain/feishu-sample.js';
+import { resolveReplyMode, type ReplyModeResolution } from './domain/reply-mode.js';
 import { RetentionMetadataError, type RetentionMetadataInput } from './domain/retention.js';
 import type { RunStatus } from './domain/status.js';
 import { sendJson } from './http/json.js';
@@ -118,6 +119,7 @@ async function handleRequest(
         'ingress-api',
         'fake-im-api',
         'feishu-sample-api',
+        'reply-mode-api',
       ],
     });
     return;
@@ -350,6 +352,17 @@ async function handleRequest(
     const sourceEvent = await controlPlane.getSourceEvent(sourceEventGetMatch[1] ?? '');
     if (!sourceEvent) throw new AgentlinkError(404, 'AL_SOURCE_EVENT_NOT_FOUND', 'Source event not found');
     sendJson(res, 200, { source_event: toSourceEventDto(sourceEvent) });
+    return;
+  }
+
+  const entryReplyModeMatch = /^\/api\/v1\/entries\/([^/]+)\/reply-mode$/.exec(url.pathname);
+  if (req.method === 'GET' && entryReplyModeMatch) {
+    requireIngressBearer(req, security);
+    const entry = await controlPlane.getEntry(entryReplyModeMatch[1] ?? '');
+    if (!entry) throw new AgentlinkError(404, 'AL_ENTRY_NOT_FOUND', 'Entry not found');
+    const groupProfile = entry.groupProfileId ? await controlPlane.getGroupProfile(entry.groupProfileId) : undefined;
+    if (entry.groupProfileId && !groupProfile) throw new AgentlinkError(404, 'AL_GROUP_PROFILE_NOT_FOUND', 'Group profile not found');
+    sendJson(res, 200, toReplyModeResolutionDto(entry.id, resolveReplyMode({ entry, ...(groupProfile ? { groupProfile } : {}) })));
     return;
   }
 
@@ -946,6 +959,17 @@ function toSourceEventDto(sourceEvent: SourceEventRecord) {
     },
     created_at: sourceEvent.createdAt,
     updated_at: sourceEvent.updatedAt,
+  };
+}
+
+function toReplyModeResolutionDto(entryId: string, resolution: ReplyModeResolution) {
+  return {
+    entry_id: entryId,
+    reply_mode: resolution.replyMode,
+    target: resolution.target,
+    in_thread: resolution.inThread,
+    ...(resolution.replyToMessageId !== undefined ? { reply_to_message_id: resolution.replyToMessageId } : {}),
+    reason: resolution.reason,
   };
 }
 

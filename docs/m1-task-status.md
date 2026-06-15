@@ -283,3 +283,19 @@ See `docs/m1-control-plane-reuse-boundary.md` for the per-object classification,
 - Added sanitized fixtures for dm/group/thread-reply under `test/fixtures/feishu/` plus domain and HTTP tests for mapping, auth 401/403/valid-token behavior, idempotent replay, invalid payload 400s, source-event reads, and no task/session/memory side effects.
 - No migrations, database statements, control-plane methods, package files, frontend expansion, OAuth, webhook subscription/challenge handling, Feishu SDK, Session, Memory, MemoryBridge, Main Agent, Task routing, multi-tenant, or complex permission behavior were added.
 - Remaining risks: this is only a sample-payload PoC, not production Feishu webhook ingestion. Real webhook verification, challenge handling, OAuth/token lifecycle, subscription management, live Feishu event compatibility, and browser/UI expansion remain future slices.
+
+## 2026-06-15 AL-M1-009 Reply mode resolver update
+
+- Added the AL-M1-009 reply mode resolver as a pure domain/read-projection slice. It introduces no database schema, migrations, control-plane methods, package changes, or frontend changes.
+- Added `src/domain/reply-mode.ts` with side-effect-free helpers:
+  - `resolveReplyMode({ entry, groupProfile? })` returns `replyMode`, `target`, `inThread`, optional `replyToMessageId`, and a reason string.
+  - `readReplyToMessageId(metadata)` safely reads `metadata.fake_im.reply_to_message_id` and `metadata.feishu.reply_to_message_id` only when they are non-empty strings.
+- Resolver behavior is intentionally minimal:
+  - DM entries resolve to `dialog` / `direct` and do not enter a thread.
+  - Thread entries, entries with `externalThreadId`, or non-DM entries carrying reply metadata resolve to `thread` / `thread` with `inThread=true`.
+  - Plain group entries use `groupProfile.defaultReplyMode` when available, otherwise default to `thread`; `dialog` groups target the channel, while `thread` groups target a thread.
+  - `web` and `unknown` entries fall back to `dialog` / `direct`.
+  - `agentMentioned` is exposed only in the reason string and does not trigger Main Agent routing or change reply mode.
+- Added `GET /api/v1/entries/{id}/reply-mode`. The endpoint reuses the AL-M1-006 ingress bearer guard, reads the existing Entry and optional GroupProfile, returns snake_case projection fields, and is placed before the bare `/api/v1/entries/{id}` route to avoid path conflicts.
+- Tests cover domain resolution rules, safe fake-im/Feishu metadata reading, endpoint 401/403/404/200 behavior, route non-conflict with the existing entry read endpoint, fake IM entries, and Feishu sample thread entries.
+- Remaining risks: this only resolves reply intent. It does not create Session, Memory, MemoryBridge, Main Agent tasks, response gateway messages, real Feishu product routing, group membership, multi-tenant policy, or any durable routing side effects.

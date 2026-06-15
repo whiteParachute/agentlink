@@ -4,6 +4,7 @@ import type { Server } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AgentlinkControlPlanePort } from '../src/control-plane/port.js';
+import type { EntryRecord } from '../src/domain/entities.js';
 import { DEFAULT_WORKSPACE } from '../src/control-plane/in-memory.js';
 import { createAgentlinkServer, createAgentlinkServerFromConfig, type AgentlinkServerOptions } from '../src/server.js';
 
@@ -63,6 +64,7 @@ test('health, ready, and meta endpoints return service metadata', async () => {
     assert.equal(body.m1Scope, 'personal:telegram-agentlink-claw-tenc-codex');
     assert.equal(body.capabilities.includes('agentlet-pull'), true);
     assert.equal(body.capabilities.includes('feishu-sample-api'), true);
+    assert.equal(body.capabilities.includes('reply-mode-api'), true);
   });
 });
 
@@ -1484,6 +1486,145 @@ test('HTTP fake IM endpoint requires ingress bearer and maps dm/group/thread eve
     assert.equal(gotEntry.status, 200);
     assert.equal(((await gotEntry.json()) as { entry: { id: string } }).entry.id, threadReplyBody.entry.id);
   }, { ingressBearerToken: 'fake-im-token' });
+});
+
+
+test('HTTP entry reply-mode endpoint requires ingress bearer and resolves fake IM entries', async () => {
+  const auth = { authorization: 'Bearer reply-mode-token' };
+  await withServer(async (baseUrl) => {
+    const group = await postJson(baseUrl, '/api/v1/group-profiles', {
+      platform: 'fake-im',
+      external_group_id: 'oc_reply_mode',
+      default_reply_mode: 'dialog',
+    });
+    assert.equal(group.status, 201);
+    const groupBody = (await group.json()) as { group_profile: { id: string } };
+
+    const dm = await postJson(baseUrl, '/api/v1/fake-im/events', { kind: 'dm', message_id: 'reply-dm-1', text: 'hello dm' }, auth);
+    assert.equal(dm.status, 201);
+    const dmBody = (await dm.json()) as { entry: { id: string } };
+
+    const missingToken = await fetch(`${baseUrl}/api/v1/entries/${dmBody.entry.id}/reply-mode`);
+    assert.equal(missingToken.status, 401);
+    assert.equal(((await missingToken.json()) as { error: { code: string } }).error.code, 'AL_AUTH_REQUIRED');
+
+    const wrongToken = await fetch(`${baseUrl}/api/v1/entries/${dmBody.entry.id}/reply-mode`, { headers: { authorization: 'Bearer wrong' } });
+    assert.equal(wrongToken.status, 403);
+    assert.equal(((await wrongToken.json()) as { error: { code: string } }).error.code, 'AL_FORBIDDEN');
+
+    const dmMode = await fetch(`${baseUrl}/api/v1/entries/${dmBody.entry.id}/reply-mode`, { headers: auth });
+    assert.equal(dmMode.status, 200);
+    const dmModeBody = (await dmMode.json()) as { entry_id: string; reply_mode: string; target: string; in_thread: boolean; reason: string; entry?: unknown };
+    assert.equal(dmModeBody.entry_id, dmBody.entry.id);
+    assert.equal(dmModeBody.reply_mode, 'dialog');
+    assert.equal(dmModeBody.target, 'direct');
+    assert.equal(dmModeBody.in_thread, false);
+    assert.equal(dmModeBody.reason, 'dm_entry_dialog');
+    assert.equal(dmModeBody.entry, undefined);
+
+    const bareEntry = await fetch(`${baseUrl}/api/v1/entries/${dmBody.entry.id}`, { headers: auth });
+    assert.equal(bareEntry.status, 200);
+    assert.equal(((await bareEntry.json()) as { entry: { id: string } }).entry.id, dmBody.entry.id);
+
+    const groupEvent = await postJson(baseUrl, '/api/v1/fake-im/events', {
+      kind: 'group',
+      message_id: 'reply-group-1',
+      chat_id: 'oc_reply_mode',
+      text: 'hello group',
+      group_profile_id: groupBody.group_profile.id,
+    }, auth);
+    assert.equal(groupEvent.status, 201);
+    const groupEventBody = (await groupEvent.json()) as { entry: { id: string } };
+    const groupMode = await fetch(`${baseUrl}/api/v1/entries/${groupEventBody.entry.id}/reply-mode`, { headers: auth });
+    assert.equal(groupMode.status, 200);
+    const groupModeBody = (await groupMode.json()) as { reply_mode: string; target: string; in_thread: boolean; reason: string };
+    assert.equal(groupModeBody.reply_mode, 'dialog');
+    assert.equal(groupModeBody.target, 'channel');
+    assert.equal(groupModeBody.in_thread, false);
+    assert.equal(groupModeBody.reason, 'group_profile_dialog');
+
+    const thread = await postJson(baseUrl, '/api/v1/fake-im/events', {
+      kind: 'thread',
+      message_id: 'reply-thread-1',
+      chat_id: 'oc_reply_mode',
+      thread_id: 'thread_1',
+      reply_to_message_id: 'reply-group-1',
+      text: 'thread reply',
+    }, auth);
+    assert.equal(thread.status, 201);
+    const threadBody = (await thread.json()) as { entry: { id: string } };
+    const threadMode = await fetch(`${baseUrl}/api/v1/entries/${threadBody.entry.id}/reply-mode`, { headers: auth });
+    assert.equal(threadMode.status, 200);
+    const threadModeBody = (await threadMode.json()) as { entry_id: string; reply_mode: string; target: string; in_thread: boolean; reply_to_message_id: string; reason: string };
+    assert.equal(threadModeBody.entry_id, threadBody.entry.id);
+    assert.equal(threadModeBody.reply_mode, 'thread');
+    assert.equal(threadModeBody.target, 'thread');
+    assert.equal(threadModeBody.in_thread, true);
+    assert.equal(threadModeBody.reply_to_message_id, 'reply-group-1');
+    assert.equal(threadModeBody.reason, 'thread_entry');
+
+    const missing = await fetch(`${baseUrl}/api/v1/entries/00000000-0000-4000-8000-000000000404/reply-mode`, { headers: auth });
+    assert.equal(missing.status, 404);
+    assert.equal(((await missing.json()) as { error: { code: string } }).error.code, 'AL_ENTRY_NOT_FOUND');
+  }, { ingressBearerToken: 'reply-mode-token' });
+});
+
+test('HTTP entry reply-mode endpoint resolves Feishu sample thread metadata', async () => {
+  const auth = { authorization: 'Bearer reply-mode-feishu-token' };
+  await withServer(async (baseUrl) => {
+    const thread = await postJson(baseUrl, '/api/v1/feishu-sample/events', loadFeishuFixture('thread-reply'), auth);
+    assert.equal(thread.status, 201);
+    const threadBody = (await thread.json()) as { entry: { id: string } };
+
+    const mode = await fetch(`${baseUrl}/api/v1/entries/${threadBody.entry.id}/reply-mode`, { headers: auth });
+    assert.equal(mode.status, 200);
+    const modeBody = (await mode.json()) as { reply_mode: string; target: string; in_thread: boolean; reply_to_message_id: string; reason: string };
+    assert.equal(modeBody.reply_mode, 'thread');
+    assert.equal(modeBody.target, 'thread');
+    assert.equal(modeBody.in_thread, true);
+    assert.equal(modeBody.reply_to_message_id, 'om_feishu_parent_001');
+    assert.equal(modeBody.reason, 'thread_entry');
+  }, { ingressBearerToken: 'reply-mode-feishu-token' });
+});
+
+
+test('HTTP entry reply-mode endpoint returns 404 when referenced group profile is missing', async () => {
+  const entry: EntryRecord = {
+    id: '00000000-0000-4000-8000-000000000901',
+    sourceEventId: '00000000-0000-4000-8000-000000000902',
+    entryType: 'group',
+    platform: 'fake-im',
+    externalChatId: 'oc_orphaned_group',
+    externalMessageId: 'orphaned-group-message',
+    groupProfileId: '00000000-0000-4000-8000-000000000903',
+    agentMentioned: false,
+    bodyText: 'orphaned group profile entry',
+    metadata: {},
+    retentionClass: 'short_term',
+    memorySpace: 'default',
+    sourceSystem: 'fake-im',
+    sensitivity: 'internal',
+    createdAt: '2026-06-15T00:00:00.000Z',
+    updatedAt: '2026-06-15T00:00:00.000Z',
+  };
+  const controlPlane = new Proxy({
+    getEntry: async (entryId: string) => (entryId === entry.id ? entry : undefined),
+    getGroupProfile: async () => undefined,
+  }, {
+    get(target, property) {
+      if (property in target) return target[property as keyof typeof target];
+      return () => {
+        throw new Error(`unexpected control-plane method for reply-mode orphan test: ${String(property)}`);
+      };
+    },
+  }) as unknown as AgentlinkControlPlanePort;
+
+  await withServer(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/api/v1/entries/${entry.id}/reply-mode`, { headers: { authorization: 'Bearer reply-mode-token' } });
+    assert.equal(response.status, 404);
+    const body = (await response.json()) as { error: { code: string } };
+    assert.equal(body.error.code, 'AL_GROUP_PROFILE_NOT_FOUND');
+  }, { controlPlane, ingressBearerToken: 'reply-mode-token' });
 });
 
 test('HTTP fake IM endpoint rejects invalid input and missing optional references', async () => {
