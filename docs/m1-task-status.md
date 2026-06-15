@@ -299,3 +299,22 @@ See `docs/m1-control-plane-reuse-boundary.md` for the per-object classification,
 - Added `GET /api/v1/entries/{id}/reply-mode`. The endpoint reuses the AL-M1-006 ingress bearer guard, reads the existing Entry and optional GroupProfile, returns snake_case projection fields, and is placed before the bare `/api/v1/entries/{id}` route to avoid path conflicts.
 - Tests cover domain resolution rules, safe fake-im/Feishu metadata reading, endpoint 401/403/404/200 behavior, route non-conflict with the existing entry read endpoint, fake IM entries, and Feishu sample thread entries.
 - Remaining risks: this only resolves reply intent. It does not create Session, Memory, MemoryBridge, Main Agent tasks, response gateway messages, real Feishu product routing, group membership, multi-tenant policy, or any durable routing side effects.
+
+## 2026-06-15 AL-M1-010 Large / Small Session model update
+
+- Added the AL-M1-010 minimal Session model for durable large/small conversation grouping. `SessionRecord` stores `session_scope = large | small`, optional platform/chat/thread refs, optional parent session, optional GroupProfile link, stable `natural_key`, metadata, and operational retention metadata.
+- Updated the initial migration only (`migrations/0001_initial.sql`): added `al_session`, added nullable `al_entry.session_id`, and added parent/scope/natural/retention/entry-session indexes. The session table intentionally has no `main_user_id`, no `singleton_key`, no tenant/domain field, and no reference to the singleton MainUser table; it continues to rely on the existing AL-M1-003 global MainUser model implicitly.
+- Added `src/domain/session.ts` for fail-closed session planning and delimiter-safe natural key construction:
+  - DM entries attach to a large `dm:<platform>:<chat_or_speaker>` session.
+  - Non-thread group entries attach to a large `group:<platform>:<chat_id>` session and do not create small sessions.
+  - Thread entries / external thread refs / reply metadata create or reuse the large group session plus a small `thread:<platform>:<chat_id>:<thread_id>` child session; the Entry points to the small session.
+  - Web/unknown entries conservatively attach to a large fallback session.
+- Wired session resolution through the control-plane port, in-memory implementation, PostgreSQL statements/repository, and Postgres adapter. Resolution is explicit and idempotent: ingress does not auto-create sessions; `resolveSession(entry_id)` creates/reuses the needed session(s) and backfills `Entry.sessionId`.
+- Added HTTP endpoints behind the existing ingress bearer guard:
+  - `POST /api/v1/sessions/resolve`
+  - `GET /api/v1/sessions/{id}`
+  - `GET /api/v1/entries/{id}/session`
+  `/api/v1/meta` now advertises `session-api`.
+- PostgreSQL session methods use explicit `row_to_json(s) AS session` envelopes and recover unique-race inserts by rolling back and re-reading durable session rows.
+- Tests added/updated for domain natural keys and rules, migration invariants including absence of `main_user_id`, in-memory idempotency and Entry backfill, PostgreSQL statement envelopes, repository large/small resolution and unique-race recovery, HTTP auth/route behavior, and fake-im/Feishu sample explicit resolve flows.
+- Remaining risks: no live PostgreSQL DSN smoke was run unless `AGENTLINK_DATABASE_URL` is provided; true concurrent PostgreSQL races are covered by scripted repository tests only. Memory, MemoryBridge, MemoryCandidate, Main Agent, Task routing, response gateway, real Feishu productization, frontend expansion, multi-tenant/multi-MainUser, complex permissions, group membership, and historical import remain intentionally out of scope.

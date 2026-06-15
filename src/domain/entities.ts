@@ -276,6 +276,27 @@ export interface GroupProfileRecord {
   updatedAt: string;
 }
 
+export type SessionScope = 'large' | 'small';
+
+export interface SessionRecord {
+  id: string;
+  sessionScope: SessionScope;
+  platform?: string;
+  externalChatId?: string;
+  externalThreadId?: string;
+  parentSessionId?: string;
+  groupProfileId?: string;
+  naturalKey: string;
+  displayName: string;
+  metadata: JsonRecord;
+  retentionClass: RetentionClass;
+  memorySpace: string;
+  sourceSystem: string;
+  sensitivity: Sensitivity;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface GroupContextProjection {
   groupProfile: GroupProfileRecord;
   platform: string;
@@ -316,6 +337,7 @@ export interface EntryRecord {
   externalMessageId?: string;
   speakerChannelUserId?: string;
   groupProfileId?: string;
+  sessionId?: string;
   agentMentioned: boolean;
   bodyText: string;
   metadata: JsonRecord;

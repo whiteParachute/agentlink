@@ -65,6 +65,7 @@ test('health, ready, and meta endpoints return service metadata', async () => {
     assert.equal(body.capabilities.includes('agentlet-pull'), true);
     assert.equal(body.capabilities.includes('feishu-sample-api'), true);
     assert.equal(body.capabilities.includes('reply-mode-api'), true);
+    assert.equal(body.capabilities.includes('session-api'), true);
   });
 });
 
@@ -1625,6 +1626,85 @@ test('HTTP entry reply-mode endpoint returns 404 when referenced group profile i
     const body = (await response.json()) as { error: { code: string } };
     assert.equal(body.error.code, 'AL_GROUP_PROFILE_NOT_FOUND');
   }, { controlPlane, ingressBearerToken: 'reply-mode-token' });
+});
+
+test('HTTP session endpoints require bearer, resolve entries, and keep route order explicit', async () => {
+  const auth = { authorization: 'Bearer session-token' };
+  await withServer(async (baseUrl) => {
+    const group = await postJson(baseUrl, '/api/v1/group-profiles', {
+      platform: 'fake-im',
+      external_group_id: 'oc_session_api',
+    });
+    assert.equal(group.status, 201);
+    const groupBody = (await group.json()) as { group_profile: { id: string } };
+
+    const groupEvent = await postJson(baseUrl, '/api/v1/fake-im/events', {
+      kind: 'group',
+      message_id: 'session-group-1',
+      chat_id: 'oc_session_api',
+      group_profile_id: groupBody.group_profile.id,
+      text: 'group session',
+    }, auth);
+    assert.equal(groupEvent.status, 201);
+    const groupEventBody = (await groupEvent.json()) as { entry: { id: string; session_id?: string | null } };
+    assert.equal(groupEventBody.entry.session_id, undefined);
+
+    const missingToken = await postJson(baseUrl, '/api/v1/sessions/resolve', { entry_id: groupEventBody.entry.id });
+    assert.equal(missingToken.status, 401);
+    const wrongToken = await postJson(baseUrl, '/api/v1/sessions/resolve', { entry_id: groupEventBody.entry.id }, { authorization: 'Bearer wrong' });
+    assert.equal(wrongToken.status, 403);
+
+    const resolved = await postJson(baseUrl, '/api/v1/sessions/resolve', { entry_id: groupEventBody.entry.id }, auth);
+    assert.equal(resolved.status, 201);
+    const resolvedBody = (await resolved.json()) as { large_session: { id: string; session_scope: string; natural_key: string }; small_session: null; session: { id: string }; entry: { id: string; session_id: string }; created: boolean };
+    assert.equal(resolvedBody.created, true);
+    assert.equal(resolvedBody.large_session.session_scope, 'large');
+    assert.equal(resolvedBody.large_session.natural_key, 'group:fake-im:oc_session_api');
+    assert.equal(resolvedBody.small_session, null);
+    assert.equal(resolvedBody.entry.session_id, resolvedBody.session.id);
+
+    const replay = await postJson(baseUrl, '/api/v1/sessions/resolve', { entry_id: groupEventBody.entry.id }, auth);
+    assert.equal(replay.status, 200);
+    const replayBody = (await replay.json()) as { session: { id: string }; created: boolean };
+    assert.equal(replayBody.created, false);
+    assert.equal(replayBody.session.id, resolvedBody.session.id);
+
+    const getSession = await fetch(`${baseUrl}/api/v1/sessions/${resolvedBody.session.id}`, { headers: auth });
+    assert.equal(getSession.status, 200);
+    assert.equal(((await getSession.json()) as { session: { id: string } }).session.id, resolvedBody.session.id);
+
+    const getEntrySession = await fetch(`${baseUrl}/api/v1/entries/${groupEventBody.entry.id}/session`, { headers: auth });
+    assert.equal(getEntrySession.status, 200);
+    assert.equal(((await getEntrySession.json()) as { session: { id: string } }).session.id, resolvedBody.session.id);
+
+    const resolveRoute = await postJson(baseUrl, '/api/v1/sessions/resolve', { entry_id: '00000000-0000-4000-8000-000000000404' }, auth);
+    assert.equal(resolveRoute.status, 404);
+    assert.equal(((await resolveRoute.json()) as { error: { code: string } }).error.code, 'AL_ENTRY_NOT_FOUND');
+
+    const missingSession = await fetch(`${baseUrl}/api/v1/sessions/00000000-0000-4000-8000-000000000404`, { headers: auth });
+    assert.equal(missingSession.status, 404);
+    assert.equal(((await missingSession.json()) as { error: { code: string } }).error.code, 'AL_SESSION_NOT_FOUND');
+  }, { ingressBearerToken: 'session-token' });
+});
+
+test('HTTP session resolve maps thread entries to small sessions without changing ingress behavior', async () => {
+  const auth = { authorization: 'Bearer session-thread-token' };
+  await withServer(async (baseUrl) => {
+    const thread = await postJson(baseUrl, '/api/v1/feishu-sample/events', loadFeishuFixture('thread-reply'), auth);
+    assert.equal(thread.status, 201);
+    const threadBody = (await thread.json()) as { entry: { id: string; session_id?: string } };
+    assert.equal(threadBody.entry.session_id, undefined);
+
+    const resolved = await postJson(baseUrl, '/api/v1/sessions/resolve', { entry_id: threadBody.entry.id }, auth);
+    assert.equal(resolved.status, 201);
+    const body = (await resolved.json()) as { large_session: { id: string; session_scope: string }; small_session: { id: string; session_scope: string; parent_session_id: string; external_thread_id: string }; session: { id: string }; entry: { session_id: string } };
+    assert.equal(body.large_session.session_scope, 'large');
+    assert.equal(body.small_session.session_scope, 'small');
+    assert.equal(body.small_session.parent_session_id, body.large_session.id);
+    assert.equal(body.small_session.external_thread_id, 'om_feishu_thread_root_001');
+    assert.equal(body.entry.session_id, body.small_session.id);
+    assert.equal(body.session.id, body.small_session.id);
+  }, { ingressBearerToken: 'session-thread-token' });
 });
 
 test('HTTP fake IM endpoint rejects invalid input and missing optional references', async () => {

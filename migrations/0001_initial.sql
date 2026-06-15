@@ -330,6 +330,26 @@ CREATE TABLE al_source_event (
   UNIQUE (source_system, source_hash)
 );
 
+CREATE TABLE al_session (
+  id uuid PRIMARY KEY,
+  session_scope text NOT NULL CHECK (session_scope IN ('large','small')),
+  platform text CHECK (platform IS NULL OR platform ~ '^[a-z][a-z0-9._:-]{0,63}$'),
+  external_chat_id text CHECK (external_chat_id IS NULL OR length(btrim(external_chat_id)) BETWEEN 1 AND 512),
+  external_thread_id text CHECK (external_thread_id IS NULL OR length(btrim(external_thread_id)) BETWEEN 1 AND 512),
+  parent_session_id uuid REFERENCES al_session(id) ON DELETE CASCADE,
+  group_profile_id uuid REFERENCES al_group_profile(id),
+  natural_key text NOT NULL CHECK (length(btrim(natural_key)) BETWEEN 1 AND 1024),
+  display_name text NOT NULL DEFAULT 'Session',
+  metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
+  retention_class al_retention_class NOT NULL DEFAULT 'operational',
+  memory_space text NOT NULL DEFAULT 'default' CHECK (memory_space ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  source_system text NOT NULL DEFAULT 'agentlink' CHECK (source_system ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'),
+  sensitivity al_sensitivity NOT NULL DEFAULT 'internal',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (session_scope, natural_key)
+);
+
 CREATE TABLE al_entry (
   id uuid PRIMARY KEY,
   source_event_id uuid NOT NULL REFERENCES al_source_event(id) ON DELETE CASCADE UNIQUE,
@@ -340,6 +360,7 @@ CREATE TABLE al_entry (
   external_message_id text CHECK (external_message_id IS NULL OR length(btrim(external_message_id)) BETWEEN 1 AND 512),
   speaker_channel_user_id uuid REFERENCES al_channel_user(id),
   group_profile_id uuid REFERENCES al_group_profile(id),
+  session_id uuid REFERENCES al_session(id),
   agent_mentioned boolean NOT NULL DEFAULT false,
   body_text text NOT NULL DEFAULT '',
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (jsonb_typeof(metadata) = 'object'),
@@ -375,9 +396,13 @@ CREATE INDEX idx_al_group_profile_group_type ON al_group_profile(group_type);
 CREATE INDEX idx_al_group_profile_retention ON al_group_profile(memory_space, retention_class);
 CREATE INDEX idx_al_source_event_source_received ON al_source_event(source_system, received_at DESC);
 CREATE INDEX idx_al_source_event_retention ON al_source_event(memory_space, retention_class);
+CREATE INDEX idx_al_session_parent ON al_session(parent_session_id);
+CREATE INDEX idx_al_session_scope_natural ON al_session(session_scope, natural_key);
+CREATE INDEX idx_al_session_retention ON al_session(memory_space, retention_class);
 CREATE INDEX idx_al_entry_source_event ON al_entry(source_event_id);
 CREATE INDEX idx_al_entry_platform_chat ON al_entry(platform, external_chat_id);
 CREATE INDEX idx_al_entry_group_profile ON al_entry(group_profile_id);
+CREATE INDEX idx_al_entry_session ON al_entry(session_id);
 CREATE INDEX idx_al_entry_speaker ON al_entry(speaker_channel_user_id);
 CREATE INDEX idx_al_entry_retention ON al_entry(memory_space, retention_class);
 

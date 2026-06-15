@@ -5,7 +5,7 @@ import { InMemoryControlPlane, type CreateTaskInput, type RegisterDeviceInput } 
 import { PostgresControlPlane } from './control-plane/postgres.js';
 import type { AgentlinkControlPlanePort } from './control-plane/port.js';
 import { PgRuntime } from './db/pg-client.js';
-import type { CapabilityGrantRecord, ChannelUserRecord, DeviceRecord, EntryRecord, GroupProfileRecord, JsonRecord, MainUserRecord, PlatformIdentityRecord, RunRecord, RunnerRecord, SourceEventRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
+import type { CapabilityGrantRecord, ChannelUserRecord, DeviceRecord, EntryRecord, GroupProfileRecord, JsonRecord, MainUserRecord, PlatformIdentityRecord, RunRecord, RunnerRecord, SourceEventRecord, SessionRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
 import { mapFakeImEventToIngest, normalizeFakeImEvent, toFakeImEventDto } from './domain/fake-im.js';
 import { mapFeishuSampleEventToIngest, normalizeFeishuSampleEvent, toFeishuSampleEventDto } from './domain/feishu-sample.js';
 import { resolveReplyMode, type ReplyModeResolution } from './domain/reply-mode.js';
@@ -120,6 +120,7 @@ async function handleRequest(
         'fake-im-api',
         'feishu-sample-api',
         'reply-mode-api',
+        'session-api',
       ],
     });
     return;
@@ -355,6 +356,33 @@ async function handleRequest(
     return;
   }
 
+  if (req.method === 'POST' && url.pathname === '/api/v1/sessions/resolve') {
+    requireIngressBearer(req, security);
+    const body = await readJsonRecord(req);
+    const retention = optionalRetention(body, 'retention');
+    const result = await controlPlane.resolveSession({
+      entryId: requireString(body, 'entry_id'),
+      ...(retention ? { retention } : {}),
+    });
+    sendJson(res, result.created ? 201 : 200, {
+      large_session: toSessionDto(result.largeSession),
+      small_session: result.smallSession ? toSessionDto(result.smallSession) : null,
+      session: toSessionDto(result.session),
+      entry: toEntryDto(result.entry),
+      created: result.created,
+    });
+    return;
+  }
+
+  const sessionGetMatch = /^\/api\/v1\/sessions\/([^/]+)$/.exec(url.pathname);
+  if (req.method === 'GET' && sessionGetMatch) {
+    requireIngressBearer(req, security);
+    const session = await controlPlane.getSession(sessionGetMatch[1] ?? '');
+    if (!session) throw new AgentlinkError(404, 'AL_SESSION_NOT_FOUND', 'Session not found');
+    sendJson(res, 200, { session: toSessionDto(session) });
+    return;
+  }
+
   const entryReplyModeMatch = /^\/api\/v1\/entries\/([^/]+)\/reply-mode$/.exec(url.pathname);
   if (req.method === 'GET' && entryReplyModeMatch) {
     requireIngressBearer(req, security);
@@ -363,6 +391,17 @@ async function handleRequest(
     const groupProfile = entry.groupProfileId ? await controlPlane.getGroupProfile(entry.groupProfileId) : undefined;
     if (entry.groupProfileId && !groupProfile) throw new AgentlinkError(404, 'AL_GROUP_PROFILE_NOT_FOUND', 'Group profile not found');
     sendJson(res, 200, toReplyModeResolutionDto(entry.id, resolveReplyMode({ entry, ...(groupProfile ? { groupProfile } : {}) })));
+    return;
+  }
+
+  const entrySessionMatch = /^\/api\/v1\/entries\/([^/]+)\/session$/.exec(url.pathname);
+  if (req.method === 'GET' && entrySessionMatch) {
+    requireIngressBearer(req, security);
+    const entry = await controlPlane.getEntry(entrySessionMatch[1] ?? '');
+    if (!entry) throw new AgentlinkError(404, 'AL_ENTRY_NOT_FOUND', 'Entry not found');
+    const result = await controlPlane.getEntrySession(entry.id);
+    if (!result) throw new AgentlinkError(404, 'AL_SESSION_NOT_FOUND', 'Session not found');
+    sendJson(res, 200, { session: toSessionDto(result.session), entry: toEntryDto(result.entry) });
     return;
   }
 
@@ -962,6 +1001,29 @@ function toSourceEventDto(sourceEvent: SourceEventRecord) {
   };
 }
 
+function toSessionDto(session: SessionRecord) {
+  return {
+    id: session.id,
+    session_scope: session.sessionScope,
+    platform: session.platform,
+    external_chat_id: session.externalChatId,
+    external_thread_id: session.externalThreadId,
+    parent_session_id: session.parentSessionId,
+    group_profile_id: session.groupProfileId,
+    natural_key: session.naturalKey,
+    display_name: session.displayName,
+    metadata: session.metadata,
+    retention: {
+      retention_class: session.retentionClass,
+      memory_space: session.memorySpace,
+      source_system: session.sourceSystem,
+      sensitivity: session.sensitivity,
+    },
+    created_at: session.createdAt,
+    updated_at: session.updatedAt,
+  };
+}
+
 function toReplyModeResolutionDto(entryId: string, resolution: ReplyModeResolution) {
   return {
     entry_id: entryId,
@@ -984,6 +1046,7 @@ function toEntryDto(entry: EntryRecord) {
     external_message_id: entry.externalMessageId,
     speaker_channel_user_id: entry.speakerChannelUserId,
     group_profile_id: entry.groupProfileId,
+    session_id: entry.sessionId,
     agent_mentioned: entry.agentMentioned,
     body_text: entry.bodyText,
     metadata: entry.metadata,

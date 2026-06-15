@@ -373,3 +373,16 @@ test('AL-M1-006 source event and entry statements use envelopes and HMAC natural
   assert.match(PostgreSqlStatements.insertEntry, /row_to_json\(e\) AS entry/i);
   assert.match(PostgreSqlStatements.findEntryBySourceEventId, /WHERE e\.source_event_id = \$1/i);
 });
+
+test('AL-M1-010 session statements use row_to_json envelopes and explicit entry backfill', () => {
+  assert.match(PostgreSqlStatements.findSessionById, /row_to_json\(s\) AS session/i);
+  assert.match(PostgreSqlStatements.findSessionByNaturalKey, /session_scope = \$1/i);
+  assert.match(PostgreSqlStatements.findSessionByNaturalKey, /natural_key = \$2/i);
+  assert.match(PostgreSqlStatements.insertSession, /INSERT INTO al_session/i);
+  assert.match(PostgreSqlStatements.insertSession, /row_to_json\(s\) AS session/i);
+  assert.match(PostgreSqlStatements.insertSession, /parent_session_id/i);
+  assert.match(PostgreSqlStatements.insertSession, /group_profile_id/i);
+  assert.match(PostgreSqlStatements.updateEntrySession, /UPDATE al_entry/i);
+  assert.match(PostgreSqlStatements.updateEntrySession, /session_id = \$2/i);
+  assert.match(PostgreSqlStatements.updateEntrySession, /row_to_json\(e\) AS entry/i);
+});

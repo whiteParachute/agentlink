@@ -12,6 +12,7 @@ import type {
   RecoverableRunRecord,
   RunEventRecord,
   RunRecord,
+  SessionRecord,
   SourceEventRecord,
   TaskRecord,
   WorkdirAccessMode,
@@ -124,4 +125,7 @@ export interface AgentlinkControlPlanePort {
   resolveSourceEvent(input: { sourceSystem: string; sourceRef: string }): MaybePromise<SourceEventRecord | undefined>;
   getEntry(id: string): MaybePromise<EntryRecord | undefined>;
   getEntryBySourceEvent(sourceEventId: string): MaybePromise<EntryRecord | undefined>;
+  resolveSession(input: { entryId: string; retention?: RetentionMetadataInput }): MaybePromise<{ largeSession: SessionRecord; smallSession?: SessionRecord; session: SessionRecord; entry: EntryRecord; created: boolean }>;
+  getSession(id: string): MaybePromise<SessionRecord | undefined>;
+  getEntrySession(entryId: string): MaybePromise<{ session: SessionRecord; entry: EntryRecord } | undefined>;
 }

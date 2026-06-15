@@ -18,6 +18,7 @@ import type {
   RunRecord,
   RunnerRecord,
   SourceEventRecord,
+  SessionRecord,
   TaskRecord,
   WorkdirAccessMode,
   WorkdirGrantRecord,
@@ -60,12 +61,14 @@ import {
   MAIN_USER_RETENTION_DEFAULTS,
   PLATFORM_IDENTITY_RETENTION_DEFAULTS,
   SOURCE_EVENT_RETENTION_DEFAULTS,
+  SESSION_RETENTION_DEFAULTS,
   TASK_RETENTION_DEFAULTS,
   normalizeRetentionMetadata,
   withoutRawRetention,
   type RetentionMetadata,
   type RetentionMetadataInput,
 } from '../domain/retention.js';
+import { planSessionForEntry, type SessionDraft } from '../domain/session.js';
 import { decideRetry } from '../domain/retry.js';
 import { hashStable, stableStringify } from '../domain/signature.js';
 import type { LeaseStatus, RunStatus } from '../domain/status.js';
@@ -168,6 +171,8 @@ export class InMemoryControlPlane {
   private readonly sourceEventUnique = new Map<string, string>();
   private readonly entries = new Map<string, EntryRecord>();
   private readonly entryBySourceEvent = new Map<string, string>();
+  private readonly sessions = new Map<string, SessionRecord>();
+  private readonly sessionUnique = new Map<string, string>();
 
   constructor(options: ControlPlaneOptions = {}) {
     this.now = options.now ?? (() => new Date());
@@ -778,6 +783,43 @@ export class InMemoryControlPlane {
     return id ? this.entries.get(id) : undefined;
   }
 
+  resolveSession(input: { entryId: string; retention?: RetentionMetadataInput }): { largeSession: SessionRecord; smallSession?: SessionRecord; session: SessionRecord; entry: EntryRecord; created: boolean } {
+    const entry = this.entries.get(input.entryId);
+    if (!entry) throw new AgentlinkError(404, 'AL_ENTRY_NOT_FOUND', 'Entry not found');
+    if (entry.groupProfileId) this.mustGetGroupProfile(entry.groupProfileId);
+    const plan = planSessionForEntry(entry);
+    const largeResult = this.getOrCreateSession(plan.large, input.retention);
+    let smallResult: { session: SessionRecord; created: boolean } | undefined;
+    if (plan.small) {
+      smallResult = this.getOrCreateSession({ ...plan.small, parentSessionId: largeResult.session.id }, input.retention);
+    }
+    const resolvedSession = smallResult?.session ?? largeResult.session;
+    const entryNeedsUpdate = entry.sessionId !== resolvedSession.id;
+    const updatedEntry: EntryRecord = entryNeedsUpdate ? { ...entry, sessionId: resolvedSession.id, updatedAt: this.timestamp() } : entry;
+    if (entryNeedsUpdate) this.entries.set(updatedEntry.id, updatedEntry);
+    const result: { largeSession: SessionRecord; smallSession?: SessionRecord; session: SessionRecord; entry: EntryRecord; created: boolean } = {
+      largeSession: largeResult.session,
+      session: resolvedSession,
+      entry: updatedEntry,
+      created: largeResult.created || (smallResult?.created ?? false),
+    };
+    if (smallResult) result.smallSession = smallResult.session;
+    return result;
+  }
+
+  getSession(id: string): SessionRecord | undefined {
+    return this.sessions.get(id);
+  }
+
+  getEntrySession(entryId: string): { session: SessionRecord; entry: EntryRecord } | undefined {
+    const entry = this.entries.get(entryId);
+    if (!entry) return undefined;
+    if (!entry.sessionId) return undefined;
+    const session = this.sessions.get(entry.sessionId);
+    if (!session) throw new AgentlinkError(404, 'AL_SESSION_NOT_FOUND', 'Session not found');
+    return { session, entry };
+  }
+
   revokeDevice(deviceId: string, reason = 'device_revoked'): { device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] } {
     const device = this.mustGetDevice(deviceId);
     if (device.status === 'REVOKED') return { device, tasks: [], runs: [], leases: [] };
@@ -1191,6 +1233,43 @@ export class InMemoryControlPlane {
     return groupProfile;
   }
 
+  private getOrCreateSession(spec: SessionDraft, retentionInput: RetentionMetadataInput | undefined): { session: SessionRecord; created: boolean } {
+    const uniqueKey = sessionKey(spec.sessionScope, spec.naturalKey);
+    const existingId = this.sessionUnique.get(uniqueKey);
+    if (existingId) return { session: this.mustGetSession(existingId), created: false };
+    if (spec.parentSessionId) this.mustGetSession(spec.parentSessionId);
+    if (spec.groupProfileId) this.mustGetGroupProfile(spec.groupProfileId);
+    const now = this.timestamp();
+    const retention = normalizeRetentionMetadata(retentionInput, SESSION_RETENTION_DEFAULTS);
+    const session: SessionRecord = {
+      id: randomUUID(),
+      sessionScope: spec.sessionScope,
+      ...(spec.platform !== undefined ? { platform: spec.platform } : {}),
+      ...(spec.externalChatId !== undefined ? { externalChatId: spec.externalChatId } : {}),
+      ...(spec.externalThreadId !== undefined ? { externalThreadId: spec.externalThreadId } : {}),
+      ...(spec.parentSessionId !== undefined ? { parentSessionId: spec.parentSessionId } : {}),
+      ...(spec.groupProfileId !== undefined ? { groupProfileId: spec.groupProfileId } : {}),
+      naturalKey: spec.naturalKey,
+      displayName: spec.displayName,
+      metadata: spec.metadata,
+      retentionClass: retention.retentionClass,
+      memorySpace: retention.memorySpace,
+      sourceSystem: retention.sourceSystem,
+      sensitivity: retention.sensitivity,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.sessions.set(session.id, session);
+    this.sessionUnique.set(uniqueKey, session.id);
+    return { session, created: true };
+  }
+
+  private mustGetSession(sessionId: string): SessionRecord {
+    const session = this.sessions.get(sessionId);
+    if (!session) throw new AgentlinkError(404, 'AL_SESSION_NOT_FOUND', 'Session not found');
+    return session;
+  }
+
   private mustGetSourceEvent(sourceEventId: string): SourceEventRecord {
     const sourceEvent = this.sourceEvents.get(sourceEventId);
     if (!sourceEvent) throw new AgentlinkError(404, 'AL_SOURCE_EVENT_NOT_FOUND', 'Source event not found');
@@ -1442,6 +1521,10 @@ function groupProfileKey(platform: string, normalizedExternalGroupId: string): s
 
 function sourceEventKey(sourceSystem: string, sourceHash: string): string {
   return `${sourceSystem}:${sourceHash}`;
+}
+
+function sessionKey(sessionScope: string, naturalKey: string): string {
+  return `${sessionScope}:${naturalKey}`;
 }
 
 function normalizeOptionalDisplayName(displayName: string | undefined): string | undefined {

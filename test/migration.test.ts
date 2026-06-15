@@ -179,7 +179,7 @@ test('initial migration gives AL-M1-005 group profile retention boundary columns
   assert.match(sql, /CREATE TABLE al_group_profile[\s\S]*sensitivity al_sensitivity NOT NULL DEFAULT 'internal'/i);
 });
 
-test('initial migration adds AL-M1-006 source event and entry tables without session/memory scope creep', () => {
+test('initial migration adds AL-M1-006 source event and entry tables without memory scope creep', () => {
   const sql = loadInitialMigration();
   assert.match(sql, /CREATE TABLE al_source_event/i);
   assert.match(sql, /source_hash text NOT NULL CHECK \(source_hash ~ '\^hmac-sha256:v1:\[0-9a-f\]\{64\}\$'\)/i);
@@ -191,7 +191,7 @@ test('initial migration adds AL-M1-006 source event and entry tables without ses
   assert.match(sql, /group_profile_id uuid REFERENCES al_group_profile\(id\)/i);
   assert.match(sql, /CREATE INDEX idx_al_source_event_source_received/i);
   assert.match(sql, /CREATE INDEX idx_al_entry_platform_chat/i);
-  for (const table of ['al_session', 'al_memory', 'al_memory_bridge']) {
+  for (const table of ['al_memory', 'al_memory_bridge']) {
     assert.doesNotMatch(sql, new RegExp(`CREATE TABLE ${table}`, 'i'));
   }
 });
@@ -208,4 +208,34 @@ test('initial migration gives AL-M1-006 ingress tables short-term retention boun
   assert.match(sql, /CREATE TABLE al_entry[\s\S]*sensitivity al_sensitivity NOT NULL DEFAULT 'internal'/i);
   assert.match(sql, /CREATE INDEX idx_al_source_event_retention ON al_source_event\(memory_space, retention_class\)/i);
   assert.match(sql, /CREATE INDEX idx_al_entry_retention ON al_entry\(memory_space, retention_class\)/i);
+});
+
+
+test('initial migration adds AL-M1-010 session table without MainUser or tenant fields', () => {
+  const sql = loadInitialMigration();
+  assert.match(sql, /CREATE TABLE al_session/i);
+  assert.match(sql, /session_scope text NOT NULL CHECK \(session_scope IN \('large','small'\)\)/i);
+  assert.match(sql, /parent_session_id uuid REFERENCES al_session\(id\) ON DELETE CASCADE/i);
+  assert.match(sql, /group_profile_id uuid REFERENCES al_group_profile\(id\)/i);
+  assert.match(sql, /UNIQUE \(session_scope, natural_key\)/i);
+  assert.match(sql, /session_id uuid REFERENCES al_session\(id\)/i);
+  assert.match(sql, /CREATE INDEX idx_al_session_parent ON al_session\(parent_session_id\)/i);
+  assert.match(sql, /CREATE INDEX idx_al_session_scope_natural ON al_session\(session_scope, natural_key\)/i);
+  assert.match(sql, /CREATE INDEX idx_al_entry_session ON al_entry\(session_id\)/i);
+  const sessionTableSql = sql.match(/CREATE TABLE al_session \([\s\S]*?\n\);/i)?.[0] ?? '';
+  assert.doesNotMatch(sessionTableSql, /main_user_id/i);
+  assert.doesNotMatch(sessionTableSql, /singleton_key/i);
+  assert.doesNotMatch(sessionTableSql, /tenant/i);
+  assert.doesNotMatch(sql, /CREATE TABLE al_memory/i);
+  assert.doesNotMatch(sql, /CREATE TABLE al_memory_bridge/i);
+  assert.doesNotMatch(sql, /0002/i);
+});
+
+test('initial migration gives AL-M1-010 sessions operational retention boundaries', () => {
+  const sql = loadInitialMigration();
+  assert.match(sql, /CREATE TABLE al_session[\s\S]*retention_class al_retention_class NOT NULL DEFAULT 'operational'/i);
+  assert.match(sql, /CREATE TABLE al_session[\s\S]*memory_space text NOT NULL DEFAULT 'default' CHECK \(memory_space ~/i);
+  assert.match(sql, /CREATE TABLE al_session[\s\S]*source_system text NOT NULL DEFAULT 'agentlink' CHECK \(source_system ~/i);
+  assert.match(sql, /CREATE TABLE al_session[\s\S]*sensitivity al_sensitivity NOT NULL DEFAULT 'internal'/i);
+  assert.match(sql, /CREATE INDEX idx_al_session_retention ON al_session\(memory_space, retention_class\)/i);
 });

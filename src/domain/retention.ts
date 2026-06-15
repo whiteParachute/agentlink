@@ -162,6 +162,13 @@ export const GROUP_PROFILE_RETENTION_DEFAULTS: RetentionDefaults = {
   sourceSystem: DEFAULT_SOURCE_SYSTEM,
 };
 
+export const SESSION_RETENTION_DEFAULTS: RetentionDefaults = {
+  retentionClass: 'operational',
+  sensitivity: 'internal',
+  memorySpace: DEFAULT_MEMORY_SPACE,
+  sourceSystem: DEFAULT_SOURCE_SYSTEM,
+};
+
 // AL-M1-006 inbound source events and entries are short-term ingress records.
 // The ingestion path overrides sourceSystem with the normalized inbound
 // source_system so retention queries can attribute data to the real source.
@@ -178,7 +185,6 @@ export const ENTRY_RETENTION_DEFAULTS: RetentionDefaults = {
   memorySpace: DEFAULT_MEMORY_SPACE,
   sourceSystem: DEFAULT_SOURCE_SYSTEM,
 };
-
 
 // Strip raw retention from an input object so idempotency signatures only
 // depend on normalized retention metadata. This ensures that omitting

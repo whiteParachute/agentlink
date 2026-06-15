@@ -1359,3 +1359,117 @@ test('PostgreSqlRepository rejects missing optional speaker reference without au
   );
   assert.deepEqual(client.calls.map((call) => call.sql), ['BEGIN', PostgreSqlStatements.findSourceEventByNaturalKey, PostgreSqlStatements.findChannelUserById, 'ROLLBACK']);
 });
+
+function sessionRow(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    id: '00000000-0000-4000-8000-000000001201',
+    session_scope: 'large',
+    platform: 'feishu',
+    external_chat_id: 'oc_1',
+    external_thread_id: null,
+    parent_session_id: null,
+    group_profile_id: null,
+    natural_key: 'group:feishu:oc_1',
+    display_name: 'Group Session',
+    metadata: { entry_type: 'group' },
+    retention_class: 'operational',
+    memory_space: 'default',
+    source_system: 'agentlink',
+    sensitivity: 'internal',
+    created_at: NOW,
+    updated_at: NOW,
+    ...overrides,
+  };
+}
+
+test('PostgreSqlRepository resolves thread entry into large and small sessions with entry backfill', async () => {
+  const client = new ScriptedSqlClient();
+  const large = sessionRow();
+  const small = sessionRow({
+    id: '00000000-0000-4000-8000-000000001202',
+    session_scope: 'small',
+    external_thread_id: 'thread_1',
+    parent_session_id: large.id,
+    natural_key: 'thread:feishu:oc_1:thread_1',
+    display_name: 'Thread Session',
+  });
+  client.enqueue(one({ entry: entryRow({ entry_type: 'thread', group_profile_id: null, session_id: null }) }));
+  client.enqueue(none());
+  client.enqueue(one({ session: large }));
+  client.enqueue(none());
+  client.enqueue(one({ session: small }));
+  client.enqueue(one({ entry: entryRow({ entry_type: 'thread', session_id: small.id }) }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const result = await repo.resolveSession({ entryId: '00000000-0000-4000-8000-000000001101' });
+
+  assert.equal(result.created, true);
+  assert.equal(result.largeSession.id, large.id);
+  assert.equal(result.smallSession?.parentSessionId, large.id);
+  assert.equal(result.session.id, small.id);
+  assert.equal(result.entry.sessionId, small.id);
+  assert.deepEqual(client.calls.map((call) => call.sql), [
+    'BEGIN',
+    PostgreSqlStatements.findEntryById,
+    PostgreSqlStatements.findSessionByNaturalKey,
+    PostgreSqlStatements.insertSession,
+    PostgreSqlStatements.findSessionByNaturalKey,
+    PostgreSqlStatements.insertSession,
+    PostgreSqlStatements.updateEntrySession,
+    'COMMIT',
+  ]);
+  assert.equal(client.calls[3]?.params?.[1], 'large');
+  assert.equal(client.calls[5]?.params?.[1], 'small');
+  assert.equal(client.calls[5]?.params?.[5], large.id);
+});
+
+test('PostgreSqlRepository reuses existing sessions and can fetch entry session', async () => {
+  const client = new ScriptedSqlClient();
+  const large = sessionRow();
+  client.enqueue(one({ entry: entryRow({ entry_type: 'group', external_thread_id: null, session_id: large.id }) }));
+  client.enqueue(one({ session: large }));
+  client.enqueue(one({ entry: entryRow({ entry_type: 'group', external_thread_id: null, session_id: large.id }) }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const result = await repo.resolveSession({ entryId: '00000000-0000-4000-8000-000000001101' });
+  assert.equal(result.created, false);
+  assert.equal(result.smallSession, undefined);
+  assert.equal(result.entry.sessionId, large.id);
+
+  const lookupClient = new ScriptedSqlClient();
+  lookupClient.enqueue(one({ entry: entryRow({ session_id: large.id }) }));
+  lookupClient.enqueue(one({ session: large }));
+  const lookupRepo = new PostgreSqlRepository(lookupClient, { now: () => new Date(NOW) });
+  const lookup = await lookupRepo.getEntrySession('00000000-0000-4000-8000-000000001101');
+  assert.equal(lookup?.session.id, large.id);
+  assert.deepEqual(lookupClient.calls.map((call) => call.sql), [PostgreSqlStatements.findEntryById, PostgreSqlStatements.findSessionById]);
+});
+
+test('PostgreSqlRepository recovers session unique race by re-reading durable session', async () => {
+  const client = new ScriptedSqlClient();
+  const unique = Object.assign(new Error('duplicate'), { code: '23505' });
+  const large = sessionRow();
+  client.enqueue(one({ entry: entryRow({ entry_type: 'group', external_thread_id: null, session_id: null }) }));
+  client.enqueue(none());
+  client.enqueue(unique);
+  client.enqueue(one({ entry: entryRow({ entry_type: 'group', external_thread_id: null, session_id: null }) }));
+  client.enqueue(one({ session: large }));
+  client.enqueue(one({ entry: entryRow({ entry_type: 'group', external_thread_id: null, session_id: large.id }) }));
+  const repo = new PostgreSqlRepository(client, { now: () => new Date(NOW) });
+
+  const result = await repo.resolveSession({ entryId: '00000000-0000-4000-8000-000000001101' });
+  assert.equal(result.created, false);
+  assert.equal(result.session.id, large.id);
+  assert.deepEqual(client.calls.map((call) => call.sql), [
+    'BEGIN',
+    PostgreSqlStatements.findEntryById,
+    PostgreSqlStatements.findSessionByNaturalKey,
+    PostgreSqlStatements.insertSession,
+    'ROLLBACK',
+    'BEGIN',
+    PostgreSqlStatements.findEntryById,
+    PostgreSqlStatements.findSessionByNaturalKey,
+    PostgreSqlStatements.updateEntrySession,
+    'COMMIT',
+  ]);
+});

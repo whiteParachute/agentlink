@@ -19,6 +19,7 @@ import type {
   RunRecord,
   RunnerRecord,
   SourceEventRecord,
+  SessionRecord,
   TaskRecord,
   WorkdirAccessMode,
   WorkdirGrantRecord,
@@ -56,12 +57,14 @@ import {
   MAIN_USER_RETENTION_DEFAULTS,
   PLATFORM_IDENTITY_RETENTION_DEFAULTS,
   SOURCE_EVENT_RETENTION_DEFAULTS,
+  SESSION_RETENTION_DEFAULTS,
   TASK_RETENTION_DEFAULTS,
   normalizeRetentionMetadata,
   type RetentionMetadata,
   type RetentionMetadataInput,
   withoutRawRetention,
 } from '../domain/retention.js';
+import { planSessionForEntry, type SessionDraft } from '../domain/session.js';
 import { decideRetry } from '../domain/retry.js';
 import { hashStable, stableStringify } from '../domain/signature.js';
 import type { RunStatus } from '../domain/status.js';
@@ -1019,6 +1022,30 @@ export class PostgreSqlRepository {
     return await this.findEntryBySourceEventId(this.client, sourceEventId);
   }
 
+  async resolveSession(input: { entryId: string; retention?: RetentionMetadataInput }): Promise<{ largeSession: SessionRecord; smallSession?: SessionRecord; session: SessionRecord; entry: EntryRecord; created: boolean }> {
+    try {
+      return await this.resolveSessionOnce(input);
+    } catch (error: unknown) {
+      if (!isUniqueViolation(error)) throw error;
+      return await this.resolveSessionOnce(input);
+    }
+  }
+
+  async getSession(id: string): Promise<SessionRecord | undefined> {
+    const result = await this.client.query<EnvelopeRow>(PostgreSqlStatements.findSessionById, [id]);
+    if (result.rowCount === 0) return undefined;
+    return mapSession(requireSingleRow(result, 'AL_INTERNAL', 'Session lookup returned rowCount without a row').session);
+  }
+
+  async getEntrySession(entryId: string): Promise<{ session: SessionRecord; entry: EntryRecord } | undefined> {
+    const entry = await this.getEntry(entryId);
+    if (!entry) return undefined;
+    if (!entry.sessionId) return undefined;
+    const session = await this.getSession(entry.sessionId);
+    if (!session) throw new AgentlinkError(404, 'AL_SESSION_NOT_FOUND', 'Session not found');
+    return { session, entry };
+  }
+
   async revokeDevice(deviceId: string, reason = 'device_revoked'): Promise<{ device: DeviceRecord; tasks: TaskRecord[]; runs: RunRecord[]; leases: LeaseRecord[] }> {
     return await withTransaction(this.client, async (tx) => {
       const now = this.timestamp();
@@ -1257,6 +1284,78 @@ export class PostgreSqlRepository {
     return mapGroupProfile(requireSingleRow(result, 'AL_INTERNAL', 'GroupProfile update returned no row').group_profile);
   }
 
+  private async resolveSessionOnce(input: { entryId: string; retention?: RetentionMetadataInput }): Promise<{ largeSession: SessionRecord; smallSession?: SessionRecord; session: SessionRecord; entry: EntryRecord; created: boolean }> {
+    return await withTransaction(this.client, async (tx) => {
+      const entry = await this.findEntryById(tx, input.entryId);
+      if (!entry) throw new AgentlinkError(404, 'AL_ENTRY_NOT_FOUND', 'Entry not found');
+      if (entry.groupProfileId) await this.mustFindGroupProfileById(tx, entry.groupProfileId);
+      const plan = planSessionForEntry(entry);
+      const largeResult = await this.getOrCreateSession(tx, plan.large, input.retention);
+      let smallResult: { session: SessionRecord; created: boolean } | undefined;
+      if (plan.small) {
+        smallResult = await this.getOrCreateSession(tx, { ...plan.small, parentSessionId: largeResult.session.id }, input.retention);
+      }
+      const resolvedSession = smallResult?.session ?? largeResult.session;
+      const entryNeedsUpdate = entry.sessionId !== resolvedSession.id;
+      const updated = entryNeedsUpdate
+        ? mapEntry(requireSingleRow(
+          await tx.query<EnvelopeRow>(PostgreSqlStatements.updateEntrySession, [entry.id, resolvedSession.id, this.timestamp()]),
+          'AL_INTERNAL',
+          'Entry session update returned no row',
+        ).entry)
+        : entry;
+      const result: { largeSession: SessionRecord; smallSession?: SessionRecord; session: SessionRecord; entry: EntryRecord; created: boolean } = {
+        largeSession: largeResult.session,
+        session: resolvedSession,
+        entry: updated,
+        created: largeResult.created || (smallResult?.created ?? false),
+      };
+      if (smallResult) result.smallSession = smallResult.session;
+      return result;
+    });
+  }
+
+  private async findEntryById(client: SqlClient, entryId: string): Promise<EntryRecord | undefined> {
+    const result = await client.query<EnvelopeRow>(PostgreSqlStatements.findEntryById, [entryId]);
+    if (result.rowCount === 0) return undefined;
+    return mapEntry(requireSingleRow(result, 'AL_INTERNAL', 'Entry lookup returned rowCount without a row').entry);
+  }
+
+  private async findSessionByNaturalKey(client: SqlClient, sessionScope: string, naturalKey: string): Promise<SessionRecord | undefined> {
+    const result = await client.query<EnvelopeRow>(PostgreSqlStatements.findSessionByNaturalKey, [sessionScope, naturalKey]);
+    if (result.rowCount === 0) return undefined;
+    return mapSession(requireSingleRow(result, 'AL_INTERNAL', 'Session lookup returned rowCount without a row').session);
+  }
+
+  private async getOrCreateSession(client: SqlClient, draft: SessionDraft, retentionInput: RetentionMetadataInput | undefined): Promise<{ session: SessionRecord; created: boolean }> {
+    const existing = await this.findSessionByNaturalKey(client, draft.sessionScope, draft.naturalKey);
+    if (existing) return { session: existing, created: false };
+    const now = this.timestamp();
+    const retention = normalizeRetentionMetadata(retentionInput, SESSION_RETENTION_DEFAULTS);
+    const session = mapSession(requireSingleRow(
+      await client.query<EnvelopeRow>(PostgreSqlStatements.insertSession, [
+        randomUUID(),
+        draft.sessionScope,
+        draft.platform ?? null,
+        draft.externalChatId ?? null,
+        draft.externalThreadId ?? null,
+        draft.parentSessionId ?? null,
+        draft.groupProfileId ?? null,
+        draft.naturalKey,
+        draft.displayName,
+        toJsonbParam(draft.metadata),
+        retention.retentionClass,
+        retention.memorySpace,
+        retention.sourceSystem,
+        retention.sensitivity,
+        now,
+      ]),
+      'AL_INTERNAL',
+      'Session insert returned no row',
+    ).session);
+    return { session, created: true };
+  }
+
   private timestamp(): string {
     return this.now().toISOString();
   }
@@ -1285,6 +1384,7 @@ interface EnvelopeRow {
   group_profile?: unknown;
   source_event?: unknown;
   entry?: unknown;
+  session?: unknown;
 }
 
 type RunEventRow = Record<string, unknown>;
@@ -1606,6 +1706,29 @@ function mapGroupProfile(value: unknown): GroupProfileRecord {
   };
 }
 
+function mapSession(value: unknown): SessionRecord {
+  const row = asRecord(value, 'session');
+  const record: SessionRecord = {
+    id: readString(row, 'id'),
+    sessionScope: readString(row, 'session_scope') as SessionRecord['sessionScope'],
+    naturalKey: readString(row, 'natural_key'),
+    displayName: readString(row, 'display_name'),
+    metadata: readJsonRecord(row, 'metadata'),
+    retentionClass: readRetentionClass(row, 'retention_class'),
+    memorySpace: readString(row, 'memory_space'),
+    sourceSystem: readString(row, 'source_system'),
+    sensitivity: readSensitivity(row, 'sensitivity'),
+    createdAt: readTimestamp(row, 'created_at'),
+    updatedAt: readTimestamp(row, 'updated_at'),
+  };
+  setOptionalString(record, 'platform', row.platform);
+  setOptionalString(record, 'externalChatId', row.external_chat_id);
+  setOptionalString(record, 'externalThreadId', row.external_thread_id);
+  setOptionalString(record, 'parentSessionId', row.parent_session_id);
+  setOptionalString(record, 'groupProfileId', row.group_profile_id);
+  return record;
+}
+
 function mapSourceEvent(value: unknown): SourceEventRecord {
   const row = asRecord(value, 'source_event');
   const record: SourceEventRecord = {
@@ -1650,6 +1773,7 @@ function mapEntry(value: unknown): EntryRecord {
   setOptionalString(record, 'externalMessageId', row.external_message_id);
   setOptionalString(record, 'speakerChannelUserId', row.speaker_channel_user_id);
   setOptionalString(record, 'groupProfileId', row.group_profile_id);
+  setOptionalString(record, 'sessionId', row.session_id);
   return record;
 }
 

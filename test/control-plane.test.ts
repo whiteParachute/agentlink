@@ -831,3 +831,72 @@ test('source event ingest keeps source_system/source_ref boundaries and rejects 
     (error) => error instanceof AgentlinkError && error.code === 'AL_GROUP_PROFILE_NOT_FOUND',
   );
 });
+
+test('session resolve creates large session for dm and is idempotent with entry backfill', () => {
+  const controlPlane = new InMemoryControlPlane({ now: () => new Date('2026-06-15T00:00:00.000Z') });
+  const ingested = controlPlane.ingestSourceEvent({
+    sourceSystem: 'fake-im',
+    sourceRef: 'session-dm-1',
+    eventType: 'message.receive',
+    platform: 'fake-im',
+    entryType: 'dm',
+    externalMessageId: 'dm-msg-1',
+    bodyText: 'hello dm',
+  });
+
+  const resolved = controlPlane.resolveSession({ entryId: ingested.entry.id });
+  assert.equal(resolved.created, true);
+  assert.equal(resolved.largeSession.sessionScope, 'large');
+  assert.equal(resolved.smallSession, undefined);
+  assert.equal(resolved.session.id, resolved.largeSession.id);
+  assert.equal(resolved.entry.sessionId, resolved.session.id);
+  assert.equal(controlPlane.getEntry(ingested.entry.id)?.sessionId, resolved.session.id);
+
+  const replay = controlPlane.resolveSession({ entryId: ingested.entry.id });
+  assert.equal(replay.created, false);
+  assert.equal(replay.session.id, resolved.session.id);
+  assert.equal(replay.entry.sessionId, resolved.session.id);
+});
+
+test('session resolve creates large plus small for thread and does not create small for non-thread group', () => {
+  const controlPlane = new InMemoryControlPlane({ now: () => new Date('2026-06-15T00:00:00.000Z') });
+  const groupProfile = controlPlane.upsertGroupProfile({ platform: 'fake-im', externalGroupId: 'oc_session', defaultReplyMode: 'dialog' }).groupProfile;
+  const group = controlPlane.ingestSourceEvent({
+    sourceSystem: 'fake-im',
+    sourceRef: 'session-group-1',
+    eventType: 'message.receive',
+    platform: 'fake-im',
+    entryType: 'group',
+    externalChatId: 'oc_session',
+    externalMessageId: 'group-msg-1',
+    groupProfileId: groupProfile.id,
+    bodyText: 'hello group',
+  });
+  const groupResolved = controlPlane.resolveSession({ entryId: group.entry.id });
+  assert.equal(groupResolved.created, true);
+  assert.equal(groupResolved.largeSession.sessionScope, 'large');
+  assert.equal(groupResolved.smallSession, undefined);
+  assert.equal(groupResolved.entry.sessionId, groupResolved.largeSession.id);
+
+  const thread = controlPlane.ingestSourceEvent({
+    sourceSystem: 'fake-im',
+    sourceRef: 'session-thread-1',
+    eventType: 'message.receive',
+    platform: 'fake-im',
+    entryType: 'thread',
+    externalChatId: 'oc_session',
+    externalThreadId: 'thread_1',
+    externalMessageId: 'thread-msg-1',
+    groupProfileId: groupProfile.id,
+    bodyText: 'hello thread',
+  });
+  const threadResolved = controlPlane.resolveSession({ entryId: thread.entry.id });
+  assert.equal(threadResolved.largeSession.id, groupResolved.largeSession.id);
+  assert.ok(threadResolved.smallSession);
+  assert.equal(threadResolved.smallSession.parentSessionId, threadResolved.largeSession.id);
+  assert.equal(threadResolved.session.id, threadResolved.smallSession.id);
+  assert.equal(threadResolved.entry.sessionId, threadResolved.smallSession.id);
+
+  const lookup = controlPlane.getEntrySession(thread.entry.id);
+  assert.equal(lookup?.session.id, threadResolved.smallSession.id);
+});

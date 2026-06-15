@@ -1266,6 +1266,74 @@ FROM al_entry e
 WHERE e.source_event_id = $1;
 `,
 
+  findSessionById: `
+SELECT row_to_json(s) AS session
+FROM al_session s
+WHERE s.id = $1;
+`,
+
+  findSessionByNaturalKey: `
+SELECT row_to_json(s) AS session
+FROM al_session s
+WHERE s.session_scope = $1
+  AND s.natural_key = $2;
+`,
+
+  insertSession: `
+WITH inserted AS (
+  INSERT INTO al_session (
+    id,
+    session_scope,
+    platform,
+    external_chat_id,
+    external_thread_id,
+    parent_session_id,
+    group_profile_id,
+    natural_key,
+    display_name,
+    metadata,
+    retention_class,
+    memory_space,
+    source_system,
+    sensitivity,
+    created_at,
+    updated_at
+  ) VALUES (
+    $1,
+    $2,
+    $3,
+    $4,
+    $5,
+    $6,
+    $7,
+    $8,
+    $9,
+    $10::jsonb,
+    $11::al_retention_class,
+    $12,
+    $13,
+    $14::al_sensitivity,
+    $15,
+    $15
+  )
+  RETURNING *
+)
+SELECT row_to_json(s) AS session
+FROM inserted s;
+`,
+
+  updateEntrySession: `
+WITH updated AS (
+  UPDATE al_entry
+  SET session_id = $2,
+      updated_at = $3
+  WHERE id = $1
+  RETURNING *
+)
+SELECT row_to_json(e) AS entry
+FROM updated e;
+`,
+
   insertSourceEvent: `
 WITH inserted AS (
   INSERT INTO al_source_event (
