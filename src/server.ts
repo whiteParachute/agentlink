@@ -10,6 +10,7 @@ import { mapFakeImEventToIngest, normalizeFakeImEvent, toFakeImEventDto } from '
 import { RetentionMetadataError, type RetentionMetadataInput } from './domain/retention.js';
 import type { RunStatus } from './domain/status.js';
 import { sendJson } from './http/json.js';
+import { renderM1ShellHtml } from './web/m1-shell.js';
 
 export interface ServerInfo {
   name: string;
@@ -85,6 +86,11 @@ async function handleRequest(
 
   if (req.method === 'GET' && url.pathname === '/readyz') {
     sendJson(res, 200, { ok: true, service: info.name, environment: info.environment });
+    return;
+  }
+
+  if (req.method === 'GET' && (url.pathname === '/m1' || url.pathname === '/m1/')) {
+    sendHtml(res, 200, renderM1ShellHtml());
     return;
   }
 
@@ -965,6 +971,17 @@ function sourceHashOptions(config: AgentlinkConfig): { sourceHashSecret?: string
 
 function ingressSecurityOptions(options: { ingressBearerToken?: string }): IngressSecurityOptions {
   return options.ingressBearerToken ? { ingressBearerToken: options.ingressBearerToken } : {};
+}
+
+function sendHtml(res: ServerResponse, statusCode: number, html: string): void {
+  res.writeHead(statusCode, {
+    'content-type': 'text/html; charset=utf-8',
+    'content-length': Buffer.byteLength(html),
+    'cache-control': 'no-store',
+    'x-content-type-options': 'nosniff',
+    'content-security-policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; object-src 'none'",
+  });
+  res.end(html);
 }
 
 function requireDatabaseUrl(config: AgentlinkConfig): string {

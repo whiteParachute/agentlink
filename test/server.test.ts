@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import type { Server } from 'node:http';
+import type { AgentlinkControlPlanePort } from '../src/control-plane/port.js';
 import { DEFAULT_WORKSPACE } from '../src/control-plane/in-memory.js';
 import { createAgentlinkServer, createAgentlinkServerFromConfig, type AgentlinkServerOptions } from '../src/server.js';
 
@@ -55,6 +56,36 @@ test('health, ready, and meta endpoints return service metadata', async () => {
     assert.equal(body.m1Scope, 'personal:telegram-agentlink-claw-tenc-codex');
     assert.equal(body.capabilities.includes('agentlet-pull'), true);
   });
+});
+
+test('M1 shell is same-origin static HTML and does not touch control-plane state', async () => {
+  const throwingControlPlane = new Proxy({}, {
+    get(_target, property) {
+      return () => {
+        throw new Error(`control-plane method must not be called for /m1: ${String(property)}`);
+      };
+    },
+  }) as AgentlinkControlPlanePort;
+
+  await withServer(async (baseUrl) => {
+    for (const path of ['/m1', '/m1/']) {
+      const response = await fetch(`${baseUrl}${path}`);
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get('content-type'), 'text/html; charset=utf-8');
+      assert.equal(response.headers.get('cache-control'), 'no-store');
+      assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+      const csp = response.headers.get('content-security-policy') ?? '';
+      assert.match(csp, /default-src 'self'/);
+      assert.match(csp, /connect-src 'self'/);
+      assert.match(csp, /frame-ancestors 'none'/);
+      const html = await response.text();
+      assert.match(html, /AL-M1-UI-001/);
+      assert.match(html, /\/api\/v1\/fake-im\/events/);
+      assert.match(html, /Session: disabled \/ future slice placeholder/);
+      assert.match(html, /Memory: disabled \/ future slice placeholder/);
+      assert.match(html, /Main Agent: disabled \/ future slice placeholder/);
+    }
+  }, { controlPlane: throwingControlPlane });
 });
 
 test('configured server keeps memory mode default and requires DSN for PostgreSQL mode', async () => {
