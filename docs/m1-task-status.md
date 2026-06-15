@@ -248,3 +248,19 @@ See `docs/m1-control-plane-reuse-boundary.md` for the per-object classification,
 
 - Production startup now fails fast unless both `AGENTLINK_SOURCE_HASH_SECRET` and `AGENTLINK_INGRESS_BEARER_TOKEN` are configured.
 - The new ingress/source-event/entry endpoints must not be exposed publicly without the bearer token. Local test/dev can run without a configured token only for non-production smoke usage.
+
+## 2026-06-15 AL-M1-007 Fake IM entry update
+
+- Added the AL-M1-007 fake IM adapter layer as an input-only mapping slice above AL-M1-006. It does not add tables, migrations, control-plane methods, or new dependencies.
+- Added `src/domain/fake-im.ts` with a fail-closed input spec for `kind = dm | group | thread`, camelCase/snake_case field aliases, source-ref construction, and mapping into existing `ingestSourceEvent(...)` input.
+- Added `POST /api/v1/fake-im/events`. The endpoint reuses the AL-M1-006 ingress bearer policy (`AGENTLINK_INGRESS_BEARER_TOKEN`) and returns `{ fake_im_event, source_event, entry, created }` with snake_case DTOs.
+- Fake IM mapping is intentionally minimal:
+  - `source_system` / `platform` are `fake-im`.
+  - `event_type` is `message.receive`.
+  - `source_ref` is stable: `fake-im:<kind>:<chat_or_dm>:<thread_or_none>:<message_id>` with escaped components, so duplicate fake events replay idempotently through SourceEvent natural-key logic.
+  - `text` maps to Entry `body_text`; `agent_mentioned` maps to Entry `agent_mentioned`; `message_id`, `chat_id`, and `thread_id` map to existing AL-M1-006 external refs.
+  - `reply_to_message_id` is stored in SourceEvent payload/metadata and Entry metadata only; no DB schema is changed.
+  - Optional `speaker_channel_user_id` and `group_profile_id` must already exist and are never auto-created.
+- Validation rejects invalid kind, missing `message_id`, group/thread without `chat_id`, thread without `thread_id`, conflicting aliases, invalid timestamps, invalid metadata, and missing optional references.
+- Tests added/updated for fake IM normalization/source-ref stability, mapper output, auth 401/403/valid-token behavior, dm/group/thread/reply ingest, idempotent replay, existing source-event/entry reads, and missing reference 404s.
+- Remaining risks: no live PostgreSQL DSN smoke was run in this environment unless `AGENTLINK_DATABASE_URL` is provided. Real Feishu/Telegram/QQ adapters, Session, large/small session, reply mode resolver, Memory, MemoryBridge, MemoryCandidate, Task routing, Main Agent, frontend UI, multi-tenant/domain expansion, group membership, and automatic ChannelUser/GroupProfile creation remain intentionally out of scope.

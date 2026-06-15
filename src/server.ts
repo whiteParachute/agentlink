@@ -6,6 +6,7 @@ import { PostgresControlPlane } from './control-plane/postgres.js';
 import type { AgentlinkControlPlanePort } from './control-plane/port.js';
 import { PgRuntime } from './db/pg-client.js';
 import type { CapabilityGrantRecord, ChannelUserRecord, DeviceRecord, EntryRecord, GroupProfileRecord, JsonRecord, MainUserRecord, PlatformIdentityRecord, RunRecord, RunnerRecord, SourceEventRecord, TaskRecord, WorkdirAccessMode, WorkdirGrantRecord } from './domain/entities.js';
+import { mapFakeImEventToIngest, normalizeFakeImEvent, toFakeImEventDto } from './domain/fake-im.js';
 import { RetentionMetadataError, type RetentionMetadataInput } from './domain/retention.js';
 import type { RunStatus } from './domain/status.js';
 import { sendJson } from './http/json.js';
@@ -108,6 +109,7 @@ async function handleRequest(
         'channel-user-api',
         'group-profile-api',
         'ingress-api',
+        'fake-im-api',
       ],
     });
     return;
@@ -281,6 +283,19 @@ async function handleRequest(
       ...(retention ? { retention } : {}),
     });
     sendJson(res, result.created ? 201 : 200, {
+      source_event: toSourceEventDto(result.sourceEvent),
+      entry: toEntryDto(result.entry),
+      created: result.created,
+    });
+    return;
+  }
+
+  if (req.method === 'POST' && url.pathname === '/api/v1/fake-im/events') {
+    requireIngressBearer(req, security);
+    const fakeImEvent = normalizeFakeImEvent(await readJsonRecord(req));
+    const result = await controlPlane.ingestSourceEvent(mapFakeImEventToIngest(fakeImEvent));
+    sendJson(res, result.created ? 201 : 200, {
+      fake_im_event: toFakeImEventDto(fakeImEvent),
       source_event: toSourceEventDto(result.sourceEvent),
       entry: toEntryDto(result.entry),
       created: result.created,

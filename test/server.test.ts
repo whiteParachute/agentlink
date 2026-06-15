@@ -1352,3 +1352,125 @@ test('HTTP ingress endpoints require configured bearer token and allow valid tok
     assert.equal(gotEntry.status, 200);
   }, { ingressBearerToken: 'ingress-test-token' });
 });
+
+test('HTTP fake IM endpoint requires ingress bearer and maps dm/group/thread events to SourceEvent/Entry', async () => {
+  const auth = { authorization: 'Bearer fake-im-token' };
+  await withServer(async (baseUrl) => {
+    const dmPayload = { kind: 'dm', message_id: 'dm-msg-1', text: 'hello dm', agent_mentioned: true };
+    const missingToken = await postJson(baseUrl, '/api/v1/fake-im/events', dmPayload);
+    assert.equal(missingToken.status, 401);
+    assert.equal(((await missingToken.json()) as { error: { code: string } }).error.code, 'AL_AUTH_REQUIRED');
+
+    const wrongToken = await postJson(baseUrl, '/api/v1/fake-im/events', dmPayload, { authorization: 'Bearer wrong' });
+    assert.equal(wrongToken.status, 403);
+    assert.equal(((await wrongToken.json()) as { error: { code: string } }).error.code, 'AL_FORBIDDEN');
+
+    const dm = await postJson(baseUrl, '/api/v1/fake-im/events', dmPayload, auth);
+    assert.equal(dm.status, 201);
+    const dmBody = (await dm.json()) as {
+      created: boolean;
+      fake_im_event: { kind: string; message_id: string; source_ref: string };
+      source_event: { id: string; source_system: string; source_ref: string; payload: { fake_im_event: { message_id: string } } };
+      entry: { id: string; source_event_id: string; entry_type: string; body_text: string; agent_mentioned: boolean; external_message_id: string };
+    };
+    assert.equal(dmBody.created, true);
+    assert.equal(dmBody.fake_im_event.source_ref, 'fake-im:dm:dm:none:dm-msg-1');
+    assert.equal(dmBody.source_event.source_system, 'fake-im');
+    assert.equal(dmBody.source_event.source_ref, 'fake-im:dm:dm:none:dm-msg-1');
+    assert.equal(dmBody.source_event.payload.fake_im_event.message_id, 'dm-msg-1');
+    assert.equal(dmBody.entry.entry_type, 'dm');
+    assert.equal(dmBody.entry.body_text, 'hello dm');
+    assert.equal(dmBody.entry.agent_mentioned, true);
+    assert.equal(dmBody.entry.external_message_id, 'dm-msg-1');
+
+    const replay = await postJson(baseUrl, '/api/v1/fake-im/events', { ...dmPayload, text: 'ignored replay text' }, auth);
+    assert.equal(replay.status, 200);
+    const replayBody = (await replay.json()) as typeof dmBody;
+    assert.equal(replayBody.created, false);
+    assert.equal(replayBody.source_event.id, dmBody.source_event.id);
+    assert.equal(replayBody.entry.id, dmBody.entry.id);
+    assert.equal(replayBody.entry.body_text, 'hello dm');
+
+    const channel = await postJson(baseUrl, '/api/v1/channel-users/upsert', { platform: 'fake-im', external_id: 'speaker-1' });
+    const channelBody = (await channel.json()) as { channel_user: { id: string } };
+    const group = await postJson(baseUrl, '/api/v1/group-profiles', { platform: 'fake-im', external_group_id: 'oc_1' });
+    const groupBody = (await group.json()) as { group_profile: { id: string } };
+
+    const groupEvent = await postJson(baseUrl, '/api/v1/fake-im/events', {
+      kind: 'group',
+      message_id: 'group-msg-1',
+      chat_id: 'oc_1',
+      text: 'hello group',
+      speaker_channel_user_id: channelBody.channel_user.id,
+      group_profile_id: groupBody.group_profile.id,
+      metadata: { trace: 'group' },
+    }, auth);
+    assert.equal(groupEvent.status, 201);
+    const groupEventBody = (await groupEvent.json()) as { source_event: { source_ref: string; metadata: { trace: string } }; entry: { entry_type: string; external_chat_id: string; speaker_channel_user_id: string; group_profile_id: string } };
+    assert.equal(groupEventBody.source_event.source_ref, 'fake-im:group:oc_1:none:group-msg-1');
+    assert.equal(groupEventBody.source_event.metadata.trace, 'group');
+    assert.equal(groupEventBody.entry.entry_type, 'group');
+    assert.equal(groupEventBody.entry.external_chat_id, 'oc_1');
+    assert.equal(groupEventBody.entry.speaker_channel_user_id, channelBody.channel_user.id);
+    assert.equal(groupEventBody.entry.group_profile_id, groupBody.group_profile.id);
+
+    const threadReply = await postJson(baseUrl, '/api/v1/fake-im/events', {
+      kind: 'thread',
+      message_id: 'thread-msg-1',
+      chat_id: 'oc_1',
+      thread_id: 'thread_1',
+      reply_to_message_id: 'group-msg-1',
+      text: 'thread reply',
+      occurred_at: '2026-06-15T01:02:03.000Z',
+    }, auth);
+    assert.equal(threadReply.status, 201);
+    const threadReplyBody = (await threadReply.json()) as {
+      fake_im_event: { reply_to_message_id: string; occurred_at: string };
+      source_event: { id: string; source_ref: string; payload: { fake_im_event: { reply_to_message_id: string } } };
+      entry: { id: string; entry_type: string; external_chat_id: string; external_thread_id: string; body_text: string };
+    };
+    assert.equal(threadReplyBody.fake_im_event.reply_to_message_id, 'group-msg-1');
+    assert.equal(threadReplyBody.fake_im_event.occurred_at, '2026-06-15T01:02:03.000Z');
+    assert.equal(threadReplyBody.source_event.source_ref, 'fake-im:thread:oc_1:thread_1:thread-msg-1');
+    assert.equal(threadReplyBody.source_event.payload.fake_im_event.reply_to_message_id, 'group-msg-1');
+    assert.equal(threadReplyBody.entry.entry_type, 'thread');
+    assert.equal(threadReplyBody.entry.external_chat_id, 'oc_1');
+    assert.equal(threadReplyBody.entry.external_thread_id, 'thread_1');
+    assert.equal(threadReplyBody.entry.body_text, 'thread reply');
+
+    const resolved = await fetch(`${baseUrl}/api/v1/source-events/resolve?source_system=fake-im&source_ref=${encodeURIComponent('fake-im:thread:oc_1:thread_1:thread-msg-1')}`, { headers: auth });
+    assert.equal(resolved.status, 200);
+    assert.equal(((await resolved.json()) as { source_event: { id: string } }).source_event.id, threadReplyBody.source_event.id);
+    const gotEntry = await fetch(`${baseUrl}/api/v1/source-events/${threadReplyBody.source_event.id}/entry`, { headers: auth });
+    assert.equal(gotEntry.status, 200);
+    assert.equal(((await gotEntry.json()) as { entry: { id: string } }).entry.id, threadReplyBody.entry.id);
+  }, { ingressBearerToken: 'fake-im-token' });
+});
+
+test('HTTP fake IM endpoint rejects invalid input and missing optional references', async () => {
+  const auth = { authorization: 'Bearer fake-im-token' };
+  await withServer(async (baseUrl) => {
+    const invalid = await postJson(baseUrl, '/api/v1/fake-im/events', { kind: 'thread', message_id: 'msg', chat_id: 'oc', text: 'missing thread' }, auth);
+    assert.equal(invalid.status, 400);
+    assert.equal(((await invalid.json()) as { error: { code: string } }).error.code, 'AL_BAD_REQUEST');
+
+    const missingUser = await postJson(baseUrl, '/api/v1/fake-im/events', {
+      kind: 'dm',
+      message_id: 'missing-user',
+      text: 'hello',
+      speaker_channel_user_id: '00000000-0000-4000-8000-000000000404',
+    }, auth);
+    assert.equal(missingUser.status, 404);
+    assert.equal(((await missingUser.json()) as { error: { code: string } }).error.code, 'AL_CHANNEL_USER_NOT_FOUND');
+
+    const missingGroup = await postJson(baseUrl, '/api/v1/fake-im/events', {
+      kind: 'group',
+      message_id: 'missing-group',
+      chat_id: 'oc_missing',
+      text: 'hello',
+      group_profile_id: '00000000-0000-4000-8000-000000000405',
+    }, auth);
+    assert.equal(missingGroup.status, 404);
+    assert.equal(((await missingGroup.json()) as { error: { code: string } }).error.code, 'AL_GROUP_PROFILE_NOT_FOUND');
+  }, { ingressBearerToken: 'fake-im-token' });
+});
