@@ -14,7 +14,9 @@
     "start": "node --enable-source-maps dist/src/server.js",
     "test": "npm run build && node --test dist/**/*.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "db:smoke": "node scripts/db-smoke.mjs"
+    "db:smoke": "node scripts/db-smoke.mjs",
+    "deploy": "bash scripts/deploy.sh start",
+    "deploy:check": "bash scripts/deploy.sh check"
   },
   "keywords": [
     "agent",

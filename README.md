@@ -109,6 +109,61 @@ npm start
 AGENTLINK_STORAGE=memory
 ```
 
+## 部署脚本
+
+`scripts/deploy.sh` 是一个最小、可审计的部署 helper，用于在 devbox/server 上拉起 Agentlink。它**不是** Docker/systemd/PM2 进程管理器，只会在前台 `exec npm start`。
+
+```bash
+# 校验配置 + 安装/构建/检查/db:smoke，但不启动服务
+npm run deploy:check        # 等价于 scripts/deploy.sh check
+
+# 校验、构建后前台启动（exec npm start）
+npm run deploy              # 等价于 scripts/deploy.sh start
+
+# 只打印将执行的启动命令与脱敏配置摘要，不做任何安装/构建/启动
+scripts/deploy.sh print-command     # 或 scripts/deploy.sh --dry-run
+scripts/deploy.sh --help
+```
+
+模式：
+
+- `start`（默认）：加载可选 env 文件 → 校验配置 → `npm ci` / `npm run build` / `npm run check` / `npm run db:smoke` → `exec npm start`。
+- `check`（别名 `prepare`）：同上但**不启动服务**，适合 CI/预检。
+- `print-command`（别名 `dry-run` / `--dry-run`）：只打印启动命令和脱敏配置摘要。
+
+env 文件：默认加载仓库根目录 `.env`（存在时），可用 `AGENTLINK_ENV_FILE` 或 `--env-file PATH` 指定。
+
+devbox / memory 用法（默认）：
+
+```bash
+AGENTLINK_STORAGE=memory npm run deploy
+```
+
+postgres / production 用法：
+
+```bash
+NODE_ENV=production \
+AGENTLINK_STORAGE=postgres \
+AGENTLINK_DATABASE_URL=postgres://... \
+AGENTLINK_SOURCE_HASH_SECRET=... \
+AGENTLINK_INGRESS_BEARER_TOKEN=... \
+npm run deploy
+```
+
+必须的环境校验：
+
+- Node.js >= 22；
+- `AGENTLINK_STORAGE=postgres` 时必须有 `AGENTLINK_DATABASE_URL`；
+- `NODE_ENV=production` 时必须有 `AGENTLINK_SOURCE_HASH_SECRET` 和 `AGENTLINK_INGRESS_BEARER_TOKEN`。
+
+Health check：服务启动后可探测 `GET /healthz` 与 `GET /readyz`。
+
+限制与安全边界：
+
+- 不是 Docker/systemd/PM2，不做进程守护、重启或多实例编排；
+- 日志中**不会**输出 token / secret / database URL 的明文（仅显示 `set (redacted)` 或 `(unset)`）；
+- **不会自动迁移业务数据库**。默认只跑 `db:smoke`（临时 schema）。如需脚本应用 `migrations/0001_initial.sql`，必须显式设置 `AGENTLINK_DEPLOY_APPLY_MIGRATION=1`（要求安装 `psql` 且配置 `AGENTLINK_DATABASE_URL`）——这会直接对目标库执行 migration，请谨慎使用，更推荐手动执行迁移。
+
 ## 开发命令
 
 ```bash
